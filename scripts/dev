@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/env.sh"
+[[ -n "${DATABASE_URL:-}" ]] || { echo "error: DATABASE_URL is not set (see .env.example)" >&2; exit 1; }
+port_free "${API_PORT:-8000}" API_PORT || exit 1
+port_free "${WEB_PORT:-5173}" WEB_PORT || exit 1
+echo "database: $(describe_url "$DATABASE_URL")   api: http://${API_HOST:-127.0.0.1}:${API_PORT:-8000}   web: http://localhost:${WEB_PORT:-5173}"
+
+pids=()
+set -m
+stop() {
+    trap - INT TERM EXIT
+    for p in ${pids[@]+"${pids[@]}"}; do kill -TERM -- "-$p" 2>/dev/null || true; done
+    wait 2>/dev/null || true
+    echo "stopped"
+}
+trap stop INT TERM HUP EXIT
+
+("$ROOT/scripts/backend" 2>&1 | sed -u 's/^/[api] /') & pids+=($!)
+("$ROOT/scripts/frontend" 2>&1 | sed -u 's/^/[web] /') & pids+=($!)
+while kill -0 "${pids[0]}" 2>/dev/null && kill -0 "${pids[1]}" 2>/dev/null; do sleep 1; done

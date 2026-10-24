@@ -1,0 +1,43 @@
+[project]
+name = "daily-qa-api"
+version = "2.0.0"
+description = "ålrium - QuizWiz API (FastAPI). Runs locally; PostgreSQL is the only Docker service."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi==0.161.1",
+    "uvicorn==0.54.0",
+    "psycopg[binary]==3.3.6",
+    "psycopg-pool==3.3.3",
+    "pydantic==2.14.1",
+    "pydantic-settings==2.16.1",
+    "pyjwt[crypto]==2.15.1",
+]
+
+[dependency-groups]
+dev = ["pytest==9.1.1", "httpx==0.28.1", "ruff==0.17.2", "mypy==2.4.0"]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 150
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S", "SIM"]
+ignore = ["S101", "S608", "B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501", "S105", "S106"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+files = ["qa_api"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+pythonpath = ["."]
+filterwarnings = ["ignore:Using `httpx` with `starlette.testclient`"]

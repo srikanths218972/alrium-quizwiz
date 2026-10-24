@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+NAME="qa-setup-sql-$$"; PORT="$(( 40000 + RANDOM % 9000 ))"; PASS="setup-$(openssl rand -hex 12)"
+cleanup() { docker rm -f "$NAME" >/dev/null 2>&1 || true; }
+trap cleanup EXIT
+fail=0
+check() { if [[ "$2" == "$3" ]]; then echo "ok   - $1"; else echo "FAIL - $1: expected [$3], got [$2]"; fail=1; fi; }
+
+tmp="$(mktemp)"; cp "$ROOT/db/setup.sql" "$tmp"; "$ROOT/scripts/build-setup-sql" >/dev/null
+check "db/setup.sql is current with db/migrations" "$(cmp -s "$tmp" "$ROOT/db/setup.sql" && echo yes)" "yes"; rm -f "$tmp"
+
+docker run -d --name "$NAME" -e POSTGRES_PASSWORD="$PASS" -e POSTGRES_USER=vm_admin -e POSTGRES_DB=postgres \
+    -p "127.0.0.1:$PORT:5432" postgres:18 -c timezone=UTC >/dev/null
+for _ in $(seq 60); do docker exec "$NAME" pg_isready -h 127.0.0.1 -U vm_admin >/dev/null 2>&1 && break; sleep 1; done
+sleep 1
+psql_in() { docker exec -i -e PGPASSWORD="$PASS" "$NAME" psql -h 127.0.0.1 -U vm_admin -X -q "$@"; }
+psql_in -d postgres -c "CREATE ROLE qa_owner LOGIN PASSWORD 'owner-pass'" -c "CREATE DATABASE from_setup OWNER qa_owner" -c "CREATE DATABASE from_migrate OWNER qa_owner"
+docker exec -i -e PGPASSWORD=owner-pass "$NAME" psql -h 127.0.0.1 -U qa_owner -d from_setup -X -v ON_ERROR_STOP=1 -f - < "$ROOT/db/setup.sql" >/dev/null
+check "a second run is refused and changes nothing" \
+    "$(docker exec -i -e PGPASSWORD=owner-pass "$NAME" psql -h 127.0.0.1 -U qa_owner -d from_setup -X -q -v ON_ERROR_STOP=1 -f - < "$ROOT/db/setup.sql" 2>&1 | grep -c 'already has the schema')" "1"
+
+BASE="postgresql://qa_owner:owner-pass@127.0.0.1:$PORT"
+cd "$ROOT/backend"
+DATABASE_URL="$BASE/from_migrate" uv run --frozen python -m qa_api.migrate >/dev/null
+check "make migrate finds nothing to apply on the setup.sql database" \
+    "$(DATABASE_URL="$BASE/from_setup" uv run --frozen python -m qa_api.migrate | tail -1)" "migrations applied: 0"
+check "schema, functions, triggers, constraints and sequences match make migrate" "$(uv run --frozen python - "$BASE/from_setup" "$BASE/from_migrate" <<'PY'
+import sys, psycopg
+from qa_api.pgmove import compare, fingerprint
+with psycopg.connect(sys.argv[1]) as a, psycopg.connect(sys.argv[2]) as b:
+    fa, fb = fingerprint(a), fingerprint(b)
+    fa.pop("database", None); fb.pop("database", None)
+    diff = [t for t in fa["tables"] if fa["tables"][t] != fb["tables"].get(t)]
+    ver = "SELECT version, filename, checksum FROM schema_migrations ORDER BY 1"
+    same_history = a.execute(ver).fetchall() == b.execute(ver).fetchall()
+    if diff == ["schema_migrations"] and same_history:
+        fa["tables"].pop("schema_migrations"); fb["tables"].pop("schema_migrations")
+    print(compare(fa, fb) or "same", diff)
+PY
+)" "same ['schema_migrations']"
+check "database time zone is Asia/Kolkata" "$(psql_in -d from_setup -At -c "SELECT current_setting('TimeZone')")" "Asia/Kolkata"
+check "no business rows inserted" "$(psql_in -d from_setup -At -c "SELECT (SELECT count(*) FROM questions) + (SELECT count(*) FROM responses) + (SELECT count(*) FROM users)")" "0"
+check "the API is ready against it" "$(uv run --frozen python - "$BASE/from_setup" <<'PY'
+import sys
+from fastapi.testclient import TestClient
+from qa_api.app import create_app
+from qa_api.config import Settings
+with TestClient(create_app(Settings(DATABASE_URL=sys.argv[1], AUTH_MODE="open", APP_ENV="local"))) as c:
+    q = {"question_date": c.get("/api/v1/auth/mode") and __import__("datetime").datetime.now(__import__("zoneinfo").ZoneInfo("Asia/Kolkata")).date().isoformat(),
+         "question": {"question": "Setup check?", "options": {"A": "a", "B": "b", "C": "c", "D": "d"}, "answer": "b"}}
+    ok = c.get("/health/ready").status_code == 200
+    qid = c.post("/api/v1/admin/questions", json=q).json()["data"]["question_id"]
+    r = c.post(f"/api/v1/questions/{qid}/responses", json={"email": "vm.check@example.test", "response_answer": "b"})
+    users = c.get("/api/v1/admin/users").json()["data"]
+    print(ok and r.status_code == 201 and r.json()["data"]["is_correct"] and [u["user_id"] for u in users] == ["vm.check@example.test"])
+PY
+)" "True"
+exit "$fail"

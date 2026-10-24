@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/qa-test.XXXXXX")"
+PROJECT="qa-test-$(date +%s)-$$"
+PORT="${QA_TEST_PORT:-$(( 50000 + RANDOM % 9000 ))}"
+PASSWORD="test-$(openssl rand -hex 16)"
+
+cat > "$WORK/test.env" <<ENV
+QA_COMPOSE_PROJECT=$PROJECT
+POSTGRES_USER=qa_test_admin
+POSTGRES_PASSWORD=$PASSWORD
+POSTGRES_DB=qa_test
+QA_DB_PORT=$PORT
+ENV
+compose() { docker compose --project-directory "$ROOT" -f "$ROOT/compose.yaml" --env-file "$WORK/test.env" "$@"; }
+cleanup() {
+    if [[ "${QA_TEST_KEEP:-0}" == "1" ]]; then
+        echo "kept test project $PROJECT on 127.0.0.1:$PORT (env: $WORK/test.env)"
+    else
+        compose down --volumes --remove-orphans >/dev/null 2>&1 || true
+        rm -rf "$WORK"
+    fi
+}
+trap cleanup EXIT
+
+echo "# disposable PostgreSQL $PROJECT on 127.0.0.1:$PORT" >&2
+compose up -d --wait db >/dev/null 2>&1
+export TEST_DATABASE_URL="postgresql://qa_test_admin:$PASSWORD@127.0.0.1:$PORT/qa_test"
+export QA_TEST_COMPOSE_PROJECT="$PROJECT" QA_TEST_ENV_FILE="$WORK/test.env"
+"$@"

@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -z "${QA_POSTMAN_INNER:-}" ]]; then export QA_POSTMAN_INNER=1; exec "$ROOT/scripts/test-db" "$0" "$@"; fi
+
+PORT="$(( 45000 + RANDOM % 4000 ))"
+LOG="$(mktemp "${TMPDIR:-/tmp}/qa-postman-api.XXXXXX")"
+export DATABASE_URL="$TEST_DATABASE_URL" AUTH_MODE=email APP_ENV=local EMAIL_LOGIN_RATE_PER_MINUTE=100 \
+    EMAIL_TOKEN_SECRET="$(openssl rand -hex 32)" ADMIN_API_KEY="$(openssl rand -hex 32)"
+cd "$ROOT/backend"
+uv run --frozen python -m qa_api.migrate >/dev/null
+
+api_pid=""
+start_api() {
+    uv run --frozen uvicorn qa_api.app:create_app --factory --host 127.0.0.1 --port "$PORT" >>"$LOG" 2>&1 & api_pid=$!
+    for _ in $(seq 60); do curl -fsS "http://127.0.0.1:$PORT/health/ready" >/dev/null 2>&1 && return 0; sleep 0.5; done
+    echo "API did not become ready:"; tail -20 "$LOG"; return 1
+}
+stop_api() { [[ -n "$api_pid" ]] && kill "$api_pid" 2>/dev/null && wait "$api_pid" 2>/dev/null || true; api_pid=""; }
+trap 'stop_api; rm -f "$LOG" "$ENV_OUT" "$ENV_OUT.write"' EXIT
+ENV_OUT="$(mktemp "${TMPDIR:-/tmp}/qa-postman-env.XXXXXX")"
+
+newman() {
+    local folders=(); for f in "$@"; do folders+=(--folder "$f"); done
+    (cd "$ROOT" && npx --no-install newman run tests/collections/integration/question_answer.postman_collection.json \
+        -e tests/collections/integration/question_answer.postman_environment.json --env-var "base_url=http://127.0.0.1:$PORT" \
+        "${TOKENS[@]}" --export-environment "$ENV_OUT" "${folders[@]}" --color off)
+}
+signin() { curl -sS -o /dev/null -X POST "http://127.0.0.1:$PORT/api/v1/auth/email-signup" -H 'content-type: application/json' -d "{\"email\":\"$1\"}"
+    curl -fsS -X POST "http://127.0.0.1:$PORT/api/v1/auth/email-login" -H 'content-type: application/json' -d "{\"email\":\"$1\"}" \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["access_token"])'; }
+tokens() { TOKENS=(--env-var "admin_key=$ADMIN_API_KEY" --env-var "token_employee_correct=$(signin first.last@example.test)"
+    --env-var "token_employee_wrong=$(signin second.person@example.test)" --env-var "token_employee_unanswered=$(signin third.person+quiz@example.test)"); }
+
+sql() { uv run --frozen python -c 'import os,sys,psycopg; c=psycopg.connect(os.environ["DATABASE_URL"], options="-c timezone=Asia/Kolkata"); print("\n".join("|".join(map(str,r)) for r in c.execute(sys.argv[1]).fetchall()))' "$1"; }
+var() { python3 -c 'import json,sys; print(next(v["value"] for v in json.load(open(sys.argv[1]))["values"] if v["key"]==sys.argv[2]))' "$ENV_OUT" "$1"; }
+
+start_api
+tokens
+echo "# empty database: read-only folder"
+newman "Health" "Identity check (read only)" "Read-only (works on an empty database)"
+echo "# populated database: requires-a-question folder must fail clearly before any write"
+if newman "Read-only (requires a question for today)" >/dev/null; then
+    echo "FAIL - the populated-state check passed on an empty database"; exit 1
+fi
+echo "ok   - populated-state check refuses an empty database"
+echo "# write run (Newman runs selected folders in collection order)"
+newman "Health" "Identity check (read only)" "Read-only (works on an empty database)" \
+       "WRITES 1: Same-date versions and history" "WRITES 2: Correct and incorrect submissions (version 2)" \
+       "WRITES 3: Replacement policy (answering an older version)" "WRITES 4: Negative tests" "Replay (read only)"
+cp "$ENV_OUT" "$ENV_OUT.write"
+echo "# populated database: read-only folders"
+newman "Read-only (works on an empty database)" "Read-only (requires a question for today)"
+cp "$ENV_OUT.write" "$ENV_OUT"
+
+echo "# SQL verification of persisted rows"
+v1="$(var v1_id)"; v2="$(var v2_id)"
+fail=0
+check() { if [[ "$2" == "$3" ]]; then echo "ok   - $1"; else echo "FAIL - $1: expected [$3], got [$2]"; fail=1; fi; }
+check "v2 correct response stored as text" "$(sql "SELECT user_name, question, correct_answer, response_answer, is_correct FROM responses WHERE question_id = $v2 AND user_id = 'first.last@example.test'")" \
+    "first.last@example.test|Which city was formerly called Madras?|Chennai|Chennai|True"
+check "v2 incorrect response stored as text" "$(sql "SELECT user_name, correct_answer, response_answer, is_correct FROM responses WHERE question_id = $v2 AND user_id = 'second.person@example.test'")" \
+    "second.person@example.test|Chennai|Mumbai|False"
+check "v1 responses keep version 1 texts" "$(sql "SELECT string_agg(user_id || ':' || correct_answer || ':' || response_answer || ':' || is_correct, ',' ORDER BY response_id) FROM responses WHERE question_id = $v1")" \
+    "first.last@example.test:New Delhi:New Delhi:true,third.person+quiz@example.test:New Delhi:Mumbai:false"
+check "no stored answer is an option label" "$(sql "SELECT count(*) FROM questions WHERE question->>'answer' IN ('A','B','C','D') AND NOT (question->'options' ? 'A' AND question->'options'->>'A' = 'A')")" "0"
+check "question payloads are JSONB with text answers" "$(sql "SELECT question->>'answer' FROM questions WHERE question_id IN ($v1, $v2) ORDER BY question_id")" $'New Delhi\nChennai'
+before="$(sql "SELECT count(*) || '/' || (SELECT count(*) FROM responses) || '/' || md5(string_agg(r::text, '' ORDER BY response_id)) FROM responses r")"
+
+echo "# restart API and database, then replay read-only"
+stop_api
+docker compose --project-directory "$ROOT" -f "$ROOT/compose.yaml" --env-file "$QA_TEST_ENV_FILE" restart db >/dev/null 2>&1
+docker compose --project-directory "$ROOT" -f "$ROOT/compose.yaml" --env-file "$QA_TEST_ENV_FILE" up -d --wait db >/dev/null 2>&1
+start_api
+tokens
+check "rows unchanged after restarts" "$(sql "SELECT count(*) || '/' || (SELECT count(*) FROM responses) || '/' || md5(string_agg(r::text, '' ORDER BY response_id)) FROM responses r")" "$before"
+(cd "$ROOT" && npx --no-install newman run tests/collections/integration/question_answer.postman_collection.json -e "$ENV_OUT" \
+    --env-var "base_url=http://127.0.0.1:$PORT" "${TOKENS[@]}" --folder "Replay (read only)" --color off) | tail -25
+exit "$fail"

@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/env.sh"
+
+need_env() { [[ -f "$ENV_FILE" ]] || { echo "error: $ENV_FILE not found. Copy .env.example to .env and set credentials." >&2; exit 1; }; }
+need_url() { [[ -n "${DATABASE_URL:-}" ]] || { echo "error: DATABASE_URL is not set (see .env.example)" >&2; exit 1; }; }
+
+usage() {
+    cat <<'TXT'
+usage: scripts/db <command>
+  up                 start the Docker PostgreSQL container only and wait until healthy
+  down               stop and remove the container (the data volume is kept)
+  status             container status and applied/pending migrations of DATABASE_URL
+  migrate [--to N]   apply pending db/migrations to DATABASE_URL (one transaction each)
+  query <name> ...   read-only db/queries/<name>.sql, e.g. query missing_dates from=2026-10-01 to=2026-10-31
+  shell              psql session on DATABASE_URL (local psql, or psql inside the container for Docker)
+  backup [dir]       custom-format pg_dump of DATABASE_URL with checksum and manifest (local pg_dump)
+TXT
+}
+
+case "${1:-help}" in
+    up)      need_env; compose up -d --wait db ;;
+    down)    need_env; compose down ;;
+    status)  need_env; compose ps; need_url; echo "database: $(describe_url "$DATABASE_URL")"; backend python -m qa_api.migrate --status ;;
+    migrate) shift; need_url; echo "migrating $(describe_url "$DATABASE_URL")"; backend python -m qa_api.migrate "$@" ;;
+    query)   shift; need_url; backend python -m qa_api.dbtool query "$@" ;;
+    shell)
+        need_url
+        if command -v psql >/dev/null 2>&1; then exec psql "$DATABASE_URL"; fi
+        port="$(python3 -c 'import sys,urllib.parse as u; print(u.urlparse(sys.argv[1]).port or 5432)' "$DATABASE_URL")"
+        if [[ "$port" == "${QA_DB_PORT:-5433}" ]]; then
+            echo "(no local psql; using psql inside the Docker database container)" >&2
+            exec docker compose --project-directory "$ROOT" -f "$ROOT/compose.yaml" --env-file "$ENV_FILE" exec -e PGPASSWORD="$POSTGRES_PASSWORD" db \
+                psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+        fi
+        echo "error: psql is not installed; install the PostgreSQL client tools (docs/POSTGRES-MIGRATION.md)" >&2; exit 1 ;;
+    backup)
+        shift; need_url
+        SOURCE_DATABASE_URL="$DATABASE_URL" TARGET_ADMIN_URL="${TARGET_ADMIN_URL:-postgresql://unused@127.0.0.1/unused}" \
+            TARGET_DATABASE="${TARGET_DATABASE:-unused}" TARGET_OWNER="${TARGET_OWNER:-unused}" backend python -m qa_api.pgmove backup "$@" ;;
+    help|-h|--help) usage ;;
+    *) usage >&2; exit 1 ;;
+esac

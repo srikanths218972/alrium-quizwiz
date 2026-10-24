@@ -1,0 +1,455 @@
+{
+  "info": {
+    "name": "ålrium - QuizWiz",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Sign-in",
+      "item": [
+        {
+          "name": "Auth mode",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "auth": {
+              "type": "noauth"
+            },
+            "url": "{{base_url}}/api/v1/auth/mode"
+          },
+          "event": []
+        },
+        {
+          "name": "Sign up",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "auth": {
+              "type": "noauth"
+            },
+            "url": "{{base_url}}/api/v1/auth/email-signup",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{email}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const stop = (msg) => { pm.execution.skipRequest(); throw new Error(msg); };",
+                  "const need = (key, label) => { const v = String(pm.variables.get(key) ?? '').trim(); if (!v) stop('Set ' + key + ' in the selected environment: ' + label); return v; };",
+                  "const body = (() => { try { return JSON.parse(pm.request.body?.raw || '{}'); } catch (e) { stop('The Body tab is not valid JSON'); } })();",
+                  "const text = (v) => (typeof v === 'string' ? v.trim() : '');",
+                  "need('email', 'the email to sign up or sign in with');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200 || pm.response.code === 201) {",
+                  "  const token = pm.response.json()?.data?.access_token;",
+                  "  if (token) pm.environment.set('token', token);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Sign in",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "auth": {
+              "type": "noauth"
+            },
+            "url": "{{base_url}}/api/v1/auth/email-login",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{email}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const stop = (msg) => { pm.execution.skipRequest(); throw new Error(msg); };",
+                  "const need = (key, label) => { const v = String(pm.variables.get(key) ?? '').trim(); if (!v) stop('Set ' + key + ' in the selected environment: ' + label); return v; };",
+                  "const body = (() => { try { return JSON.parse(pm.request.body?.raw || '{}'); } catch (e) { stop('The Body tab is not valid JSON'); } })();",
+                  "const text = (v) => (typeof v === 'string' ? v.trim() : '');",
+                  "need('email', 'the email to sign up or sign in with');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200 || pm.response.code === 201) {",
+                  "  const token = pm.response.json()?.data?.access_token;",
+                  "  if (token) pm.environment.set('token', token);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Admin",
+      "item": [
+        {
+          "name": "List all users",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Admin-Key",
+                "value": "{{admin_key}}"
+              }
+            ],
+            "auth": {
+              "type": "noauth"
+            },
+            "url": "{{base_url}}/api/v1/admin/users?page={{page}}&page_size={{page_size}}"
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const stop = (msg) => { pm.execution.skipRequest(); throw new Error(msg); };",
+                  "const need = (key, label) => { const v = String(pm.variables.get(key) ?? '').trim(); if (!v) stop('Set ' + key + ' in the selected environment: ' + label); return v; };",
+                  "const body = (() => { try { return JSON.parse(pm.request.body?.raw || '{}'); } catch (e) { stop('The Body tab is not valid JSON'); } })();",
+                  "const text = (v) => (typeof v === 'string' ? v.trim() : '');",
+                  "need('admin_key', 'ADMIN_API_KEY from the server .env');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "All responses",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Admin-Key",
+                "value": "{{admin_key}}"
+              }
+            ],
+            "auth": {
+              "type": "noauth"
+            },
+            "url": "{{base_url}}/api/v1/admin/responses?page={{page}}&page_size={{page_size}}"
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const stop = (msg) => { pm.execution.skipRequest(); throw new Error(msg); };",
+                  "const need = (key, label) => { const v = String(pm.variables.get(key) ?? '').trim(); if (!v) stop('Set ' + key + ' in the selected environment: ' + label); return v; };",
+                  "const body = (() => { try { return JSON.parse(pm.request.body?.raw || '{}'); } catch (e) { stop('The Body tab is not valid JSON'); } })();",
+                  "const text = (v) => (typeof v === 'string' ? v.trim() : '');",
+                  "need('admin_key', 'ADMIN_API_KEY from the server .env');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Responses to question",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Admin-Key",
+                "value": "{{admin_key}}"
+              }
+            ],
+            "auth": {
+              "type": "noauth"
+            },
+            "url": "{{base_url}}/api/v1/admin/responses?question_id={{question_id}}&page={{page}}&page_size={{page_size}}"
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const stop = (msg) => { pm.execution.skipRequest(); throw new Error(msg); };",
+                  "const need = (key, label) => { const v = String(pm.variables.get(key) ?? '').trim(); if (!v) stop('Set ' + key + ' in the selected environment: ' + label); return v; };",
+                  "const body = (() => { try { return JSON.parse(pm.request.body?.raw || '{}'); } catch (e) { stop('The Body tab is not valid JSON'); } })();",
+                  "const text = (v) => (typeof v === 'string' ? v.trim() : '');",
+                  "need('admin_key', 'ADMIN_API_KEY from the server .env');",
+                  "const questionId = need('question_id', 'send Get question of the day first');",
+                  "if (!/^[1-9][0-9]{0,9}$/.test(questionId)) stop('question_id must be a positive integer');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Answers by date",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Admin-Key",
+                "value": "{{admin_key}}"
+              }
+            ],
+            "auth": {
+              "type": "noauth"
+            },
+            "url": "{{base_url}}/api/v1/admin/answers/by-date?date={{date}}"
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const stop = (msg) => { pm.execution.skipRequest(); throw new Error(msg); };",
+                  "const need = (key, label) => { const v = String(pm.variables.get(key) ?? '').trim(); if (!v) stop('Set ' + key + ' in the selected environment: ' + label); return v; };",
+                  "const body = (() => { try { return JSON.parse(pm.request.body?.raw || '{}'); } catch (e) { stop('The Body tab is not valid JSON'); } })();",
+                  "const text = (v) => (typeof v === 'string' ? v.trim() : '');",
+                  "need('admin_key', 'ADMIN_API_KEY from the server .env');",
+                  "if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(need('date', 'the question date to report, YYYY-MM-DD'))) stop('date must be YYYY-MM-DD');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get all questions",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Admin-Key",
+                "value": "{{admin_key}}"
+              }
+            ],
+            "auth": {
+              "type": "noauth"
+            },
+            "url": "{{base_url}}/api/v1/admin/questions?page={{page}}&page_size={{page_size}}"
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const stop = (msg) => { pm.execution.skipRequest(); throw new Error(msg); };",
+                  "const need = (key, label) => { const v = String(pm.variables.get(key) ?? '').trim(); if (!v) stop('Set ' + key + ' in the selected environment: ' + label); return v; };",
+                  "const body = (() => { try { return JSON.parse(pm.request.body?.raw || '{}'); } catch (e) { stop('The Body tab is not valid JSON'); } })();",
+                  "const text = (v) => (typeof v === 'string' ? v.trim() : '');",
+                  "need('admin_key', 'ADMIN_API_KEY from the server .env');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create question",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Admin-Key",
+                "value": "{{admin_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "auth": {
+              "type": "noauth"
+            },
+            "url": "{{base_url}}/api/v1/admin/questions",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"question_date\": \"\",\n  \"question\": {\n    \"question\": \"\",\n    \"options\": {\n      \"A\": \"\",\n      \"B\": \"\",\n      \"C\": \"\",\n      \"D\": \"\"\n    },\n    \"answer\": \"\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const stop = (msg) => { pm.execution.skipRequest(); throw new Error(msg); };",
+                  "const need = (key, label) => { const v = String(pm.variables.get(key) ?? '').trim(); if (!v) stop('Set ' + key + ' in the selected environment: ' + label); return v; };",
+                  "const body = (() => { try { return JSON.parse(pm.request.body?.raw || '{}'); } catch (e) { stop('The Body tab is not valid JSON'); } })();",
+                  "const text = (v) => (typeof v === 'string' ? v.trim() : '');",
+                  "need('admin_key', 'ADMIN_API_KEY from the server .env');",
+                  "if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(text(body.question_date))) stop('Fill \"question_date\" in the Body tab as YYYY-MM-DD');",
+                  "const q = body.question || {};",
+                  "const opts = q.options || {};",
+                  "if (!text(q.question)) stop('Fill \"question\" in the Body tab');",
+                  "if (!['A', 'B', 'C', 'D'].every((k) => text(opts[k]))) stop('Fill all four options A to D in the Body tab');",
+                  "if (!text(q.answer)) stop('Fill \"answer\" in the Body tab with the exact text of the correct option');",
+                  "if (!Object.values(opts).map(text).includes(text(q.answer))) stop('\"answer\" must equal the text of one option');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200 || pm.response.code === 201) {",
+                  "  const id = pm.response.json()?.data?.question_id;",
+                  "  if (Number.isInteger(id) && id > 0) pm.environment.set('question_id', String(id));",
+                  "}"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Participant",
+      "item": [
+        {
+          "name": "Get question of the day",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "url": "{{base_url}}/api/v1/questions/today"
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const stop = (msg) => { pm.execution.skipRequest(); throw new Error(msg); };",
+                  "const need = (key, label) => { const v = String(pm.variables.get(key) ?? '').trim(); if (!v) stop('Set ' + key + ' in the selected environment: ' + label); return v; };",
+                  "const body = (() => { try { return JSON.parse(pm.request.body?.raw || '{}'); } catch (e) { stop('The Body tab is not valid JSON'); } })();",
+                  "const text = (v) => (typeof v === 'string' ? v.trim() : '');",
+                  "need('token', 'send Sign up or Sign in first');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200 || pm.response.code === 201) {",
+                  "  const id = pm.response.json()?.data?.question_id;",
+                  "  if (Number.isInteger(id) && id > 0) pm.environment.set('question_id', String(id));",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Post response",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "url": "{{base_url}}/api/v1/questions/{{question_id}}/responses",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"response_answer\": \"\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const stop = (msg) => { pm.execution.skipRequest(); throw new Error(msg); };",
+                  "const need = (key, label) => { const v = String(pm.variables.get(key) ?? '').trim(); if (!v) stop('Set ' + key + ' in the selected environment: ' + label); return v; };",
+                  "const body = (() => { try { return JSON.parse(pm.request.body?.raw || '{}'); } catch (e) { stop('The Body tab is not valid JSON'); } })();",
+                  "const text = (v) => (typeof v === 'string' ? v.trim() : '');",
+                  "need('token', 'send Sign up or Sign in first');",
+                  "const questionId = need('question_id', 'send Get question of the day first');",
+                  "if (!/^[1-9][0-9]{0,9}$/.test(questionId)) stop('question_id must be a positive integer');",
+                  "if (!text(body.response_answer)) stop('Fill \"response_answer\" in the Body tab with the exact text of the chosen option');"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

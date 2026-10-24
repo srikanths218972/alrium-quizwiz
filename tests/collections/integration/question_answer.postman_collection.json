@@ -1,0 +1,3432 @@
+{
+  "info": {
+    "name": "ålrium - QuizWiz API",
+    "description": "ålrium - QuizWiz API (FastAPI). Questions are JSONB {\"question\",\"options\":{\"A\"..\"D\"},\"answer\"} where answer is the actual option text; several versions may share a date and the newest is served; questions are insert-only. Core operations: GET /api/v1/questions/today, GET /api/v1/admin/questions (all questions, admin), POST /api/v1/questions/{id}/responses with {\"response_answer\":\"<option text>\"}. Folders named WRITES insert rows and change today's question: run them only against a disposable test database (make test-postman) unless you deliberately selected that environment. Read-only folders are safe on the working database. See docs/POSTMAN.md. Contains no tokens or keys.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Fresh Delhi business dates before every request (India has no daylight saving time: UTC+05:30).",
+          "const delhi = (offsetDays) => new Date(Date.now() + 330 * 60000 + offsetDays * 86400000).toISOString().slice(0, 10);",
+          "pm.environment.set('current_date', delhi(0));",
+          "pm.environment.set('past_date', delhi(-1));",
+          "pm.environment.set('future_date', delhi(1));"
+        ]
+      }
+    },
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Shared checks for every response.",
+          "const apiPath = pm.request.url.getPath();",
+          "if (pm.response.code >= 400 && apiPath.startsWith('/api/')) {",
+          "  pm.test('error envelope has code, message and request_id', () => {",
+          "    const e = pm.response.json().error;",
+          "    pm.expect(e.code).to.be.a('string');",
+          "    pm.expect(e.message).to.be.a('string');",
+          "    pm.expect(e.request_id).to.be.a('string');",
+          "  });",
+          "  pm.test('no SQL or stack details in errors', () => {",
+          "    pm.expect(pm.response.text()).to.not.match(/Traceback|SELECT |constraint|psycopg|QA00/i);",
+          "  });",
+          "}",
+          "if (apiPath.startsWith('/api/')) {",
+          "  pm.test('Cache-Control: no-store', () => pm.expect(pm.response.headers.get('Cache-Control')).to.eql('no-store'));",
+          "}"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "description": "Liveness has no database dependency; readiness checks the database and the required migration (0004).",
+      "item": [
+        {
+          "name": "Liveness",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/health/live",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "health",
+                "live"
+              ]
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 ok', () => pm.expect(pm.response.json()).to.eql({ status: 'ok' }));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Readiness (database + migration 0004)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/health/ready",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "health",
+                "ready"
+              ]
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 ready at 0004', () => { pm.expect(pm.response.code).to.eql(200); pm.expect(pm.response.json()).to.eql({ status: 'ready', migration: '0004' }); });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Authentication (Microsoft Entra, manual)",
+      "description": "Real sign-in through the Postman OAuth 2.0 helper: Authorization Code with PKCE, public client, no client secret. Open this request, Authorization tab, \"Get New Access Token\", sign in as the intended user, then copy the ACCESS token (not the ID token) into the matching token_* variable: three different non-admin accounts into the employee variables. Set expected_email_* to those accounts. Admin requests in this suite use X-Admin-Key (email mode); in Microsoft mode check admin access with the client collection and admin_token. See docs/POSTMAN.md.",
+      "item": [
+        {
+          "name": "Entra: who am I (uses OAuth helper token)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/me",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "me"
+              ]
+            },
+            "auth": {
+              "type": "oauth2",
+              "oauth2": [
+                {
+                  "key": "grant_type",
+                  "value": "authorization_code_with_pkce",
+                  "type": "string"
+                },
+                {
+                  "key": "authUrl",
+                  "value": "https://login.microsoftonline.com/{{tenant_id}}/oauth2/v2.0/authorize",
+                  "type": "string"
+                },
+                {
+                  "key": "accessTokenUrl",
+                  "value": "https://login.microsoftonline.com/{{tenant_id}}/oauth2/v2.0/token",
+                  "type": "string"
+                },
+                {
+                  "key": "clientId",
+                  "value": "{{postman_client_id}}",
+                  "type": "string"
+                },
+                {
+                  "key": "scope",
+                  "value": "{{api_scope}} openid profile offline_access",
+                  "type": "string"
+                },
+                {
+                  "key": "redirect_uri",
+                  "value": "{{callback_url}}",
+                  "type": "string"
+                },
+                {
+                  "key": "useBrowser",
+                  "value": false,
+                  "type": "boolean"
+                },
+                {
+                  "key": "challengeAlgorithm",
+                  "value": "S256",
+                  "type": "string"
+                },
+                {
+                  "key": "client_authentication",
+                  "value": "body",
+                  "type": "string"
+                },
+                {
+                  "key": "addTokenTo",
+                  "value": "header",
+                  "type": "string"
+                },
+                {
+                  "key": "tokenName",
+                  "value": "ålrium - QuizWiz API",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('signed in with Entra', () => { pm.expect(pm.response.code).to.eql(200); pm.expect(pm.response.json().data.auth_mode).to.eql('entra'); });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Identity check (read only)",
+      "description": "Each token variable must resolve to its expected identity and role. Guards against pasting a token into the wrong variable.",
+      "item": [
+        {
+          "name": "Who am I: employee-correct",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_employee_correct}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/me",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "me"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const isDelhiTs = (s) => {",
+                  "  if (typeof s !== 'string' || !/^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\+05:30$/.test(s)) return false;",
+                  "  const t = Date.parse(s);",
+                  "  return !Number.isNaN(t) && new Date(t + 330 * 60000).toISOString().slice(0, 19) === s.slice(0, 19);",
+                  "};",
+                  "pm.test('identity matches token_employee_correct', () => {",
+                  "  pm.expect(pm.response.code).to.eql(200);",
+                  "  const me = pm.response.json().data;",
+                  "  pm.expect(me.user_id).to.eql((pm.environment.get('expected_email_employee_correct') || 'first.last@example.test').toLowerCase());",
+                  "  pm.expect(me.is_admin).to.eql(false);",
+                  "  pm.expect(me.user_name.toLowerCase()).to.not.include('demo');",
+                  "  pm.expect(me.timezone).to.eql('Asia/Kolkata');",
+                  "  pm.expect(me.business_date).to.eql(pm.environment.get('current_date'));",
+                  "  pm.expect(isDelhiTs(me.server_time)).to.eql(true);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Who am I: employee-wrong",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_employee_wrong}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/me",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "me"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const isDelhiTs = (s) => {",
+                  "  if (typeof s !== 'string' || !/^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\+05:30$/.test(s)) return false;",
+                  "  const t = Date.parse(s);",
+                  "  return !Number.isNaN(t) && new Date(t + 330 * 60000).toISOString().slice(0, 19) === s.slice(0, 19);",
+                  "};",
+                  "pm.test('identity matches token_employee_wrong', () => {",
+                  "  pm.expect(pm.response.code).to.eql(200);",
+                  "  const me = pm.response.json().data;",
+                  "  pm.expect(me.user_id).to.eql((pm.environment.get('expected_email_employee_wrong') || 'second.person@example.test').toLowerCase());",
+                  "  pm.expect(me.is_admin).to.eql(false);",
+                  "  pm.expect(me.user_name.toLowerCase()).to.not.include('demo');",
+                  "  pm.expect(me.timezone).to.eql('Asia/Kolkata');",
+                  "  pm.expect(me.business_date).to.eql(pm.environment.get('current_date'));",
+                  "  pm.expect(isDelhiTs(me.server_time)).to.eql(true);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Who am I: employee-unanswered",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_employee_unanswered}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/me",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "me"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const isDelhiTs = (s) => {",
+                  "  if (typeof s !== 'string' || !/^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\+05:30$/.test(s)) return false;",
+                  "  const t = Date.parse(s);",
+                  "  return !Number.isNaN(t) && new Date(t + 330 * 60000).toISOString().slice(0, 19) === s.slice(0, 19);",
+                  "};",
+                  "pm.test('identity matches token_employee_unanswered', () => {",
+                  "  pm.expect(pm.response.code).to.eql(200);",
+                  "  const me = pm.response.json().data;",
+                  "  pm.expect(me.user_id).to.eql((pm.environment.get('expected_email_employee_unanswered') || 'third.person+quiz@example.test').toLowerCase());",
+                  "  pm.expect(me.is_admin).to.eql(false);",
+                  "  pm.expect(me.user_name.toLowerCase()).to.not.include('demo');",
+                  "  pm.expect(me.timezone).to.eql('Asia/Kolkata');",
+                  "  pm.expect(me.business_date).to.eql(pm.environment.get('current_date'));",
+                  "  pm.expect(isDelhiTs(me.server_time)).to.eql(true);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Read-only (works on an empty database)",
+      "description": "GET requests only; safe against any database, including the working one. Passes whether or not questions exist.",
+      "item": [
+        {
+          "name": "All questions, unfiltered, page 1 (admin)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Admin-Key",
+                "value": "{{admin_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/admin/questions?page=1&page_size=20",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "questions"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "page_size",
+                  "value": "20"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const isDelhiTs = (s) => {",
+                  "  if (typeof s !== 'string' || !/^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\+05:30$/.test(s)) return false;",
+                  "  const t = Date.parse(s);",
+                  "  return !Number.isNaN(t) && new Date(t + 330 * 60000).toISOString().slice(0, 19) === s.slice(0, 19);",
+                  "};",
+                  "pm.test('200 paginated, no date filter required', () => {",
+                  "  pm.expect(pm.response.code).to.eql(200);",
+                  "  const b = pm.response.json();",
+                  "  pm.expect(b.meta.page).to.eql(1);",
+                  "  pm.expect(b.meta.page_size).to.eql(20);",
+                  "  pm.expect(b.meta.total).to.be.at.least(b.data.length);",
+                  "  pm.expect(b.data.length).to.be.at.most(20);",
+                  "});",
+                  "pm.test('full payload with an actual-text answer', () => {",
+                  "  pm.response.json().data.forEach((q) => {",
+                  "    pm.expect(Object.keys(q.question).sort()).to.eql(['answer', 'options', 'question']);",
+                  "    pm.expect(Object.values(q.question.options)).to.include(q.question.answer);",
+                  "    pm.expect(typeof q.is_latest_for_date).to.eql('boolean');",
+                  "    pm.expect(isDelhiTs(q.created_at)).to.eql(true);",
+                  "  });",
+                  "});",
+                  "pm.test('ordered by date, created_at, question_id', () => {",
+                  "  const key = (q) => [q.question_date, q.created_at, String(q.question_id).padStart(10, '0')].join('|');",
+                  "  const rows = pm.response.json().data;",
+                  "  for (let i = 1; i < rows.length; i++) pm.expect(key(rows[i - 1]) <= key(rows[i])).to.eql(true);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "All questions as an employee is 403",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_employee_unanswered}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/admin/questions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "questions"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 403 FORBIDDEN', () => {",
+                  "  pm.expect(pm.response.code).to.eql(403);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('FORBIDDEN');",
+                  "});",
+                  "pm.test('no question content leaked', () => pm.expect(pm.response.text()).to.not.match(/options|\"answer\"/));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Today's question: 200, or 404 when none is scheduled",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_employee_unanswered}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/questions/today",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "questions",
+                "today"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 or 404 QUESTION_NOT_SCHEDULED', () => pm.expect([200, 404]).to.include(pm.response.code));",
+                  "if (pm.response.code === 404) pm.test('404 code', () => pm.expect(pm.response.json().error.code).to.eql('QUESTION_NOT_SCHEDULED'));",
+                  "else pm.test('never includes the answer in the question', () => pm.expect(pm.response.json().data.question).to.not.have.property('answer'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "My saved history (employee-correct)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_employee_correct}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/me/responses?page_size=5",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "me",
+                "responses"
+              ],
+              "query": [
+                {
+                  "key": "page_size",
+                  "value": "5"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const isDelhiTs = (s) => {",
+                  "  if (typeof s !== 'string' || !/^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\+05:30$/.test(s)) return false;",
+                  "  const t = Date.parse(s);",
+                  "  return !Number.isNaN(t) && new Date(t + 330 * 60000).toISOString().slice(0, 19) === s.slice(0, 19);",
+                  "};",
+                  "pm.test('200 with text values and Delhi timestamps', () => {",
+                  "  pm.expect(pm.response.code).to.eql(200);",
+                  "  pm.response.json().data.forEach((r) => {",
+                  "    ['question', 'correct_answer', 'response_answer'].forEach((k) => pm.expect(r[k]).to.be.a('string'));",
+                  "    pm.expect(isDelhiTs(r.responded_at)).to.eql(true);",
+                  "  });",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Read-only (requires a question for today)",
+      "description": "GET requests only. Fails with a clear message when nothing is scheduled today; run the WRITES folders first on a test database, or insert a question deliberately (POST /api/v1/admin/questions).",
+      "item": [
+        {
+          "name": "Today's question exists and hides the answer",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_employee_unanswered}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/questions/today",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "questions",
+                "today"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const isDelhiTs = (s) => {",
+                  "  if (typeof s !== 'string' || !/^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\+05:30$/.test(s)) return false;",
+                  "  const t = Date.parse(s);",
+                  "  return !Number.isNaN(t) && new Date(t + 330 * 60000).toISOString().slice(0, 19) === s.slice(0, 19);",
+                  "};",
+                  "pm.test('a question is scheduled for today (otherwise run the WRITES folders on a test database)', () => pm.expect(pm.response.code).to.eql(200));",
+                  "const d = pm.response.json().data;",
+                  "pm.test('nested question with four options for today', () => {",
+                  "  pm.expect(d.question_date).to.eql(pm.environment.get('current_date'));",
+                  "  pm.expect(d.question.question).to.be.a('string').and.not.empty;",
+                  "  ['A', 'B', 'C', 'D'].forEach((k) => pm.expect(d.question.options[k]).to.be.a('string').and.not.empty);",
+                  "  pm.expect(d.question).to.not.have.property('answer');",
+                  "  pm.expect(isDelhiTs(d.created_at)).to.eql(true);",
+                  "});",
+                  "if (!d.answered) pm.test('no correct answer before answering', () => pm.expect(pm.response.text()).to.not.match(/correct_answer|is_correct/));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "WRITES 1: Same-date versions and history",
+      "description": "WRITES. Run only against a disposable test database (make test-postman does this) or when you deliberately selected an environment where these rows should exist: questions are insert-only, so every row created here stays, and inserting for today CHANGES TODAY'S QUESTION for everyone. Version 1 is inserted and answered; version 2 (different question and answer) is inserted for the same date. Today's endpoint must serve version 2 and version 1's saved response must stay exactly as it was.",
+      "item": [
+        {
+          "name": "Insert version 1 for today",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Admin-Key",
+                "value": "{{admin_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/admin/questions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "questions"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"question_date\": \"{{current_date}}\",\n  \"question\": {\n    \"question\": \"What is the capital of India?\",\n    \"options\": {\n      \"A\": \"Mumbai\",\n      \"B\": \"New Delhi\",\n      \"C\": \"Chennai\",\n      \"D\": \"Kolkata\"\n    },\n    \"answer\": \"New Delhi\"\n  }\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const isDelhiTs = (s) => {",
+                  "  if (typeof s !== 'string' || !/^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\+05:30$/.test(s)) return false;",
+                  "  const t = Date.parse(s);",
+                  "  return !Number.isNaN(t) && new Date(t + 330 * 60000).toISOString().slice(0, 19) === s.slice(0, 19);",
+                  "};",
+                  "pm.test('HTTP 201', () => {",
+                  "  pm.expect(pm.response.code).to.eql(201);",
+                  "  ",
+                  "});",
+                  "const q = pm.response.json().data;",
+                  "pm.test('created as a new integer ID with the exact payload', () => {",
+                  "  pm.expect(Number.isInteger(q.question_id)).to.eql(true);",
+                  "  pm.expect(q.question_date).to.eql(pm.environment.get('current_date'));",
+                  "  pm.expect(Object.values(q.question.options)).to.include(q.question.answer);",
+                  "  pm.expect(q.response_count).to.eql(0);",
+                  "  pm.expect(q.is_latest_for_date).to.eql(true);",
+                  "  pm.expect(isDelhiTs(q.created_at)).to.eql(true);",
+                  "});",
+                  "pm.environment.set('v1_id', q.question_id);",
+                  "pm.environment.set('v1_text', q.question.question);",
+                  "pm.environment.set('v1_answer', q.question.answer);",
+                  "pm.environment.set('v1_wrong', Object.values(q.question.options).find((v) => v !== q.question.answer));",
+                  "pm.test('answer is the actual text, not a label', () => pm.expect(q.question.answer).to.eql('New Delhi'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Today's question is version 1",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_employee_correct}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/questions/today",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "questions",
+                "today"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => {",
+                  "  pm.expect(pm.response.code).to.eql(200);",
+                  "  ",
+                  "});",
+                  "pm.test('version 1 served with its exact text', () => {",
+                  "  const d = pm.response.json().data;",
+                  "  pm.expect(d.question_id).to.eql(Number(pm.environment.get('v1_id')));",
+                  "  pm.expect(d.question.question).to.eql(pm.environment.get('v1_text'));",
+                  "});",
+                  "",
+                  "pm.test('no answer before answering', () => {",
+                  "  const d = pm.response.json().data;",
+                  "  pm.expect(Object.keys(d.question).sort()).to.eql(['options', 'question']);",
+                  "  pm.expect(Object.keys(d.question.options).sort()).to.eql(['A', 'B', 'C', 'D']);",
+                  "  pm.expect(d.answered).to.eql(false);",
+                  "  pm.expect(d.my_response).to.eql(null);",
+                  "  pm.expect(pm.response.text()).to.not.match(/\"answer\"|correct_answer|is_correct/);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Answer version 1 correctly (employee-correct)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_employee_correct}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/questions/{{v1_id}}/responses",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "questions",
+                "{{v1_id}}",
+                "responses"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"response_answer\": \"{{v1_answer}}\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const isDelhiTs = (s) => {",
+                  "  if (typeof s !== 'string' || !/^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\+05:30$/.test(s)) return false;",
+                  "  const t = Date.parse(s);",
+                  "  return !Number.isNaN(t) && new Date(t + 330 * 60000).toISOString().slice(0, 19) === s.slice(0, 19);",
+                  "};",
+                  "pm.test('HTTP 201', () => {",
+                  "  pm.expect(pm.response.code).to.eql(201);",
+                  "  ",
+                  "});",
+                  "const d = pm.response.json().data;",
+                  "pm.test('saved result: exact texts, IDs, correctness and Delhi timestamp', () => {",
+                  "  pm.expect(Object.keys(d).sort()).to.eql(['correct_answer', 'is_correct', 'question', 'question_id', 'responded_at', 'response_answer', 'response_id']);",
+                  "  pm.expect(Number.isInteger(d.response_id)).to.eql(true);",
+                  "  pm.expect(d.question_id).to.eql(Number(pm.environment.get('v1_id')));",
+                  "  pm.expect(d.question).to.eql(pm.environment.get('v1_text'));",
+                  "  pm.expect(d.correct_answer).to.eql(pm.environment.get('v1_answer'));",
+                  "  pm.expect(d.response_answer).to.eql(pm.environment.get('v1_answer'));",
+                  "  pm.expect(d.is_correct).to.eql(true);",
+                  "  pm.expect(isDelhiTs(d.responded_at)).to.eql(true);",
+                  "});",
+                  "pm.environment.set('v1_saved', JSON.stringify(d));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Insert version 2 for the same date (different question and answer)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Admin-Key",
+                "value": "{{admin_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/admin/questions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "questions"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"question_date\": \"{{current_date}}\",\n  \"question\": {\n    \"question\": \"Which city was formerly called Madras?\",\n    \"options\": {\n      \"A\": \"Mumbai\",\n      \"B\": \"New Delhi\",\n      \"C\": \"Chennai\",\n      \"D\": \"Kolkata\"\n    },\n    \"answer\": \"Chennai\"\n  }\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const isDelhiTs = (s) => {",
+                  "  if (typeof s !== 'string' || !/^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\+05:30$/.test(s)) return false;",
+                  "  const t = Date.parse(s);",
+                  "  return !Number.isNaN(t) && new Date(t + 330 * 60000).toISOString().slice(0, 19) === s.slice(0, 19);",
+                  "};",
+                  "pm.test('HTTP 201', () => {",
+                  "  pm.expect(pm.response.code).to.eql(201);",
+                  "  ",
+                  "});",
+                  "const q = pm.response.json().data;",
+                  "pm.test('created as a new integer ID with the exact payload', () => {",
+                  "  pm.expect(Number.isInteger(q.question_id)).to.eql(true);",
+                  "  pm.expect(q.question_date).to.eql(pm.environment.get('current_date'));",
+                  "  pm.expect(Object.values(q.question.options)).to.include(q.question.answer);",
+                  "  pm.expect(q.response_count).to.eql(0);",
+                  "  pm.expect(q.is_latest_for_date).to.eql(true);",
+                  "  pm.expect(isDelhiTs(q.created_at)).to.eql(true);",
+                  "});",
+                  "pm.environment.set('v2_id', q.question_id);",
+                  "pm.environment.set('v2_text', q.question.question);",
+                  "pm.environment.set('v2_answer', q.question.answer);",
+                  "pm.environment.set('v2_wrong', Object.values(q.question.options).find((v) => v !== q.question.answer));",
+                  "pm.test('distinct, higher ID than version 1', () => pm.expect(q.question_id).to.be.above(Number(pm.environment.get('v1_id'))));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Today's question is now version 2",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_employee_unanswered}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/questions/today",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "questions",
+                "today"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => {",
+                  "  pm.expect(pm.response.code).to.eql(200);",
+                  "  ",
+                  "});",
+                  "pm.test('newest row selected (created_at DESC, question_id DESC)', () => {",
+                  "  const d = pm.response.json().data;",
+                  "  pm.expect(d.question_id).to.eql(Number(pm.environment.get('v2_id')));",
+                  "  pm.expect(d.question.question).to.eql(pm.environment.get('v2_text'));",
+                  "});",
+                  "",
+                  "pm.test('no answer before answering', () => {",
+                  "  const d = pm.response.json().data;",
+                  "  pm.expect(Object.keys(d.question).sort()).to.eql(['options', 'question']);",
+                  "  pm.expect(Object.keys(d.question.options).sort()).to.eql(['A', 'B', 'C', 'D']);",
+                  "  pm.expect(d.answered).to.eql(false);",
+                  "  pm.expect(d.my_response).to.eql(null);",
+                  "  pm.expect(pm.response.text()).to.not.match(/\"answer\"|correct_answer|is_correct/);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Version 1's saved response is unchanged",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_employee_correct}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/questions/{{v1_id}}/my-response",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "questions",
+                "{{v1_id}}",
+                "my-response"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => {",
+                  "  pm.expect(pm.response.code).to.eql(200);",
+                  "  ",
+                  "});",
+                  "pm.test('identical to the response saved before version 2 existed', () => pm.expect(pm.response.json().data).to.eql(JSON.parse(pm.environment.get('v1_saved'))));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Count today's questions (for v1_id)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Admin-Key",
+                "value": "{{admin_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/admin/questions?from={{current_date}}&to={{current_date}}&page_size=1",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "questions"
+              ],
+              "query": [
+                {
+                  "key": "from",
+                  "value": "{{current_date}}"
+                },
+                {
+                  "key": "to",
+                  "value": "{{current_date}}"
+                },
+                {
+                  "key": "page_size",
+                  "value": "1"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const total = pm.response.json().meta.total;",
+                  "pm.test('both versions counted', () => pm.expect(total).to.be.at.least(2));",
+                  "pm.environment.set('find_page', String(Math.floor((total - 2) / 20) + 1));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Find v1_id on its page",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Admin-Key",
+                "value": "{{admin_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/admin/questions?from={{current_date}}&to={{current_date}}&page={{find_page}}&page_size=20",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "questions"
+              ],
+              "query": [
+                {
+                  "key": "from",
+                  "value": "{{current_date}}"
+                },
+                {
+                  "key": "to",
+                  "value": "{{current_date}}"
+                },
+                {
+                  "key": "page",
+                  "value": "{{find_page}}"
+                },
+                {
+                  "key": "page_size",
+                  "value": "20"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const prefix = 'v1_id'.replace('_id', '');",
+                  "const q = pm.response.json().data.find((r) => r.question_id === Number(pm.environment.get('v1_id')));",
+                  "pm.test('v1_id is still stored, unchanged', () => {",
+                  "  pm.expect(q, 'question on page ' + pm.environment.get('find_page')).to.be.an('object');",
+                  "  pm.expect(q.question.question).to.eql(pm.environment.get(prefix + '_text'));",
+                  "  pm.expect(q.question.answer).to.eql(pm.environment.get(prefix + '_answer'));",
+                  "});",
+                  "pm.test('only the newest version is latest', () => pm.expect(q.is_latest_for_date).to.eql(prefix === 'v2'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Count today's questions (for v2_id)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Admin-Key",
+                "value": "{{admin_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/admin/questions?from={{current_date}}&to={{current_date}}&page_size=1",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "questions"
+              ],
+              "query": [
+                {
+                  "key": "from",
+                  "value": "{{current_date}}"
+                },
+                {
+                  "key": "to",
+                  "value": "{{current_date}}"
+                },
+                {
+                  "key": "page_size",
+                  "value": "1"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const total = pm.response.json().meta.total;",
+                  "pm.test('both versions counted', () => pm.expect(total).to.be.at.least(2));",
+                  "pm.environment.set('find_page', String(Math.floor((total - 1) / 20) + 1));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Find v2_id on its page",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Admin-Key",
+                "value": "{{admin_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/admin/questions?from={{current_date}}&to={{current_date}}&page={{find_page}}&page_size=20",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "questions"
+              ],
+              "query": [
+                {
+                  "key": "from",
+                  "value": "{{current_date}}"
+                },
+                {
+                  "key": "to",
+                  "value": "{{current_date}}"
+                },
+                {
+                  "key": "page",
+                  "value": "{{find_page}}"
+                },
+                {
+                  "key": "page_size",
+                  "value": "20"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const prefix = 'v2_id'.replace('_id', '');",
+                  "const q = pm.response.json().data.find((r) => r.question_id === Number(pm.environment.get('v2_id')));",
+                  "pm.test('v2_id is still stored, unchanged', () => {",
+                  "  pm.expect(q, 'question on page ' + pm.environment.get('find_page')).to.be.an('object');",
+                  "  pm.expect(q.question.question).to.eql(pm.environment.get(prefix + '_text'));",
+                  "  pm.expect(q.question.answer).to.eql(pm.environment.get(prefix + '_answer'));",
+                  "});",
+                  "pm.test('only the newest version is latest', () => pm.expect(q.is_latest_for_date).to.eql(prefix === 'v2'));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "WRITES 2: Correct and incorrect submissions (version 2)",
+      "description": "WRITES. Run only against a disposable test database (make test-postman does this) or when you deliberately selected an environment where these rows should exist: questions are insert-only, so every row created here stays, and inserting for today CHANGES TODAY'S QUESTION for everyone. Answers are sent as option TEXT by different users. Each run answers a fresh version 2, so the folder is repeatable.",
+      "item": [
+        {
+          "name": "Submit the correct answer text (employee-correct)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_employee_correct}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/questions/{{v2_id}}/responses",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "questions",
+                "{{v2_id}}",
+                "responses"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"response_answer\": \"{{v2_answer}}\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const isDelhiTs = (s) => {",
+                  "  if (typeof s !== 'string' || !/^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\+05:30$/.test(s)) return false;",
+                  "  const t = Date.parse(s);",
+                  "  return !Number.isNaN(t) && new Date(t + 330 * 60000).toISOString().slice(0, 19) === s.slice(0, 19);",
+                  "};",
+                  "pm.test('HTTP 201', () => {",
+                  "  pm.expect(pm.response.code).to.eql(201);",
+                  "  ",
+                  "});",
+                  "const d = pm.response.json().data;",
+                  "pm.test('saved result: exact texts, IDs, correctness and Delhi timestamp', () => {",
+                  "  pm.expect(Object.keys(d).sort()).to.eql(['correct_answer', 'is_correct', 'question', 'question_id', 'responded_at', 'response_answer', 'response_id']);",
+                  "  pm.expect(Number.isInteger(d.response_id)).to.eql(true);",
+                  "  pm.expect(d.question_id).to.eql(Number(pm.environment.get('v2_id')));",
+                  "  pm.expect(d.question).to.eql(pm.environment.get('v2_text'));",
+                  "  pm.expect(d.correct_answer).to.eql(pm.environment.get('v2_answer'));",
+                  "  pm.expect(d.response_answer).to.eql(pm.environment.get('v2_answer'));",
+                  "  pm.expect(d.is_correct).to.eql(true);",
+                  "  pm.expect(isDelhiTs(d.responded_at)).to.eql(true);",
+                  "});",
+                  "pm.environment.set('v2_saved', JSON.stringify(d));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Submit an incorrect answer text (employee-wrong)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_employee_wrong}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/questions/{{v2_id}}/responses",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "questions",
+                "{{v2_id}}",
+                "responses"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"response_answer\": \"{{v2_wrong}}\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const isDelhiTs = (s) => {",
+                  "  if (typeof s !== 'string' || !/^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\+05:30$/.test(s)) return false;",
+                  "  const t = Date.parse(s);",
+                  "  return !Number.isNaN(t) && new Date(t + 330 * 60000).toISOString().slice(0, 19) === s.slice(0, 19);",
+                  "};",
+                  "pm.test('HTTP 201', () => {",
+                  "  pm.expect(pm.response.code).to.eql(201);",
+                  "  ",
+                  "});",
+                  "const d = pm.response.json().data;",
+                  "pm.test('saved result: exact texts, IDs, correctness and Delhi timestamp', () => {",
+                  "  pm.expect(Object.keys(d).sort()).to.eql(['correct_answer', 'is_correct', 'question', 'question_id', 'responded_at', 'response_answer', 'response_id']);",
+                  "  pm.expect(Number.isInteger(d.response_id)).to.eql(true);",
+                  "  pm.expect(d.question_id).to.eql(Number(pm.environment.get('v2_id')));",
+                  "  pm.expect(d.question).to.eql(pm.environment.get('v2_text'));",
+                  "  pm.expect(d.correct_answer).to.eql(pm.environment.get('v2_answer'));",
+                  "  pm.expect(d.response_answer).to.eql(pm.environment.get('v2_wrong'));",
+                  "  pm.expect(d.is_correct).to.eql(false);",
+                  "  pm.expect(isDelhiTs(d.responded_at)).to.eql(true);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Repeat submission is 409 (employee-correct)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_employee_correct}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/questions/{{v2_id}}/responses",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "questions",
+                "{{v2_id}}",
+                "responses"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"response_answer\": \"{{v2_wrong}}\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 409 ALREADY_ANSWERED', () => {",
+                  "  pm.expect(pm.response.code).to.eql(409);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('ALREADY_ANSWERED');",
+                  "});",
+                  "pm.test('message', () => pm.expect(pm.response.json().error.message).to.eql('You have already answered this question.'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Saved result unchanged after the repeat",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_employee_correct}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/questions/{{v2_id}}/my-response",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "questions",
+                "{{v2_id}}",
+                "my-response"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => {",
+                  "  pm.expect(pm.response.code).to.eql(200);",
+                  "  ",
+                  "});",
+                  "pm.test('identical to the first saved response', () => pm.expect(pm.response.json().data).to.eql(JSON.parse(pm.environment.get('v2_saved'))));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Today's question after answering (employee-wrong)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_employee_wrong}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/questions/today",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "questions",
+                "today"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => {",
+                  "  pm.expect(pm.response.code).to.eql(200);",
+                  "  ",
+                  "});",
+                  "pm.test('answered state restored with saved texts', () => {",
+                  "  const d = pm.response.json().data;",
+                  "  pm.expect(d.question_id).to.eql(Number(pm.environment.get('v2_id')));",
+                  "  pm.expect(d.answered).to.eql(true);",
+                  "  pm.expect(d.my_response.response_answer).to.eql(pm.environment.get('v2_wrong'));",
+                  "  pm.expect(d.my_response.correct_answer).to.eql(pm.environment.get('v2_answer'));",
+                  "  pm.expect(d.my_response.is_correct).to.eql(false);",
+                  "  pm.expect(d.question).to.not.have.property('answer');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "History includes version 2 (employee-correct)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_employee_correct}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/me/responses?from={{current_date}}&to={{current_date}}&page_size=100",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "me",
+                "responses"
+              ],
+              "query": [
+                {
+                  "key": "from",
+                  "value": "{{current_date}}"
+                },
+                {
+                  "key": "to",
+                  "value": "{{current_date}}"
+                },
+                {
+                  "key": "page_size",
+                  "value": "100"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => {",
+                  "  pm.expect(pm.response.code).to.eql(200);",
+                  "  ",
+                  "});",
+                  "pm.test('both answered versions listed with their own texts', () => {",
+                  "  const rows = pm.response.json().data;",
+                  "  const by = Object.fromEntries(rows.map((r) => [r.question_id, r]));",
+                  "  pm.expect(by[pm.environment.get('v2_id')].correct_answer).to.eql(pm.environment.get('v2_answer'));",
+                  "  pm.expect(by[pm.environment.get('v1_id')].correct_answer).to.eql(pm.environment.get('v1_answer'));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Audit list for version 2 (admin)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Admin-Key",
+                "value": "{{admin_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/admin/responses?question_id={{v2_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "responses"
+              ],
+              "query": [
+                {
+                  "key": "question_id",
+                  "value": "{{v2_id}}"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => {",
+                  "  pm.expect(pm.response.code).to.eql(200);",
+                  "  ",
+                  "});",
+                  "pm.test('both users stored with names and actual texts', () => {",
+                  "  const rows = pm.response.json().data;",
+                  "  pm.expect(rows).to.have.lengthOf(2);",
+                  "  const by = Object.fromEntries(rows.map((r) => [r.user_id, r]));",
+                  "  const right = by[(pm.environment.get('expected_email_employee_correct') || 'first.last@example.test').toLowerCase()];",
+                  "  const wrong = by[(pm.environment.get('expected_email_employee_wrong') || 'second.person@example.test').toLowerCase()];",
+                  "  pm.expect(right.response_answer).to.eql(pm.environment.get('v2_answer'));",
+                  "  pm.expect(right.is_correct).to.eql(true);",
+                  "  pm.expect(wrong.response_answer).to.eql(pm.environment.get('v2_wrong'));",
+                  "  pm.expect(wrong.correct_answer).to.eql(pm.environment.get('v2_answer'));",
+                  "  pm.expect(wrong.is_correct).to.eql(false);",
+                  "  rows.forEach((r) => pm.expect(r.question).to.eql(pm.environment.get('v2_text')));",
+                  "  if (!pm.environment.get('expected_email_employee_correct')) {",
+                  "    // Email mode: the display name is the email itself.",
+                  "    pm.expect(right.user_name).to.eql(right.user_id);",
+                  "    pm.expect(wrong.user_name).to.eql(wrong.user_id);",
+                  "  }",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Statistics for version 2 (admin)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Admin-Key",
+                "value": "{{admin_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/admin/questions/{{v2_id}}/stats",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "questions",
+                "{{v2_id}}",
+                "stats"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => {",
+                  "  pm.expect(pm.response.code).to.eql(200);",
+                  "  ",
+                  "});",
+                  "pm.test('two responses, one correct, distribution mapped from text to labels', () => {",
+                  "  const s = pm.response.json().data;",
+                  "  pm.expect(s.correct_answer).to.eql(pm.environment.get('v2_answer'));",
+                  "  pm.expect([s.total, s.correct, s.incorrect, s.unmatched, s.accuracy]).to.eql([2, 1, 1, 0, 0.5]);",
+                  "  pm.expect(s.distribution.A + s.distribution.B + s.distribution.C + s.distribution.D).to.eql(2);",
+                  "});",
+                  "pm.environment.set('v2_total', pm.response.json().data.total);"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "WRITES 3: Replacement policy (answering an older version)",
+      "description": "WRITES. Run only against a disposable test database (make test-postman does this) or when you deliberately selected an environment where these rows should exist: questions are insert-only, so every row created here stays, and inserting for today CHANGES TODAY'S QUESTION for everyone. Proposed policy for review (the meeting did not settle it): a question shown earlier today can still be answered by its exact ID after a newer version exists, and is scored against that ID only. One response per question, not per day.",
+      "item": [
+        {
+          "name": "Older version 1 still answerable by its ID (employee-unanswered)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_employee_unanswered}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/questions/{{v1_id}}/responses",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "questions",
+                "{{v1_id}}",
+                "responses"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"response_answer\": \"{{v1_wrong}}\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const isDelhiTs = (s) => {",
+                  "  if (typeof s !== 'string' || !/^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\+05:30$/.test(s)) return false;",
+                  "  const t = Date.parse(s);",
+                  "  return !Number.isNaN(t) && new Date(t + 330 * 60000).toISOString().slice(0, 19) === s.slice(0, 19);",
+                  "};",
+                  "pm.test('HTTP 201', () => {",
+                  "  pm.expect(pm.response.code).to.eql(201);",
+                  "  ",
+                  "});",
+                  "const d = pm.response.json().data;",
+                  "pm.test('saved result: exact texts, IDs, correctness and Delhi timestamp', () => {",
+                  "  pm.expect(Object.keys(d).sort()).to.eql(['correct_answer', 'is_correct', 'question', 'question_id', 'responded_at', 'response_answer', 'response_id']);",
+                  "  pm.expect(Number.isInteger(d.response_id)).to.eql(true);",
+                  "  pm.expect(d.question_id).to.eql(Number(pm.environment.get('v1_id')));",
+                  "  pm.expect(d.question).to.eql(pm.environment.get('v1_text'));",
+                  "  pm.expect(d.correct_answer).to.eql(pm.environment.get('v1_answer'));",
+                  "  pm.expect(d.response_answer).to.eql(pm.environment.get('v1_wrong'));",
+                  "  pm.expect(d.is_correct).to.eql(false);",
+                  "  pm.expect(isDelhiTs(d.responded_at)).to.eql(true);",
+                  "});",
+                  "pm.test('scored against version 1, never switched to version 2', () => pm.expect(d.correct_answer).to.not.eql(pm.environment.get('v2_answer')));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "WRITES 4: Negative tests",
+      "description": "WRITES. Run only against a disposable test database (make test-postman does this) or when you deliberately selected an environment where these rows should exist: questions are insert-only, so every row created here stays, and inserting for today CHANGES TODAY'S QUESTION for everyone. Every request must be rejected with the documented status. Inserts one future-dated and one past-dated fixture (which do not change today's question) to check the today-only rule, and one future question whose options are literally A-D. Ends by checking nothing else was written.",
+      "item": [
+        {
+          "name": "Count stored questions before",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Admin-Key",
+                "value": "{{admin_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/admin/questions?page_size=1",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "questions"
+              ],
+              "query": [
+                {
+                  "key": "page_size",
+                  "value": "1"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.environment.set('questions_before', pm.response.json().meta.total);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Missing auth is 401",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/questions/today",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "questions",
+                "today"
+              ]
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 401 UNAUTHORIZED', () => {",
+                  "  pm.expect(pm.response.code).to.eql(401);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('UNAUTHORIZED');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Garbage token is 401",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer aaa.bbb.ccc"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/me",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "me"
+              ]
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 401 UNAUTHORIZED', () => {",
+                  "  pm.expect(pm.response.code).to.eql(401);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('UNAUTHORIZED');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Missing auth on submit is 401",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/questions/{{v2_id}}/responses",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "questions",
+                "{{v2_id}}",
+                "responses"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"response_answer\": \"Mumbai\"\n}"
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 401', () => {",
+                  "  pm.expect(pm.response.code).to.eql(401);",
+                  "  ",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Employee cannot insert questions (403)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_employee_wrong}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/admin/questions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "questions"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"question_date\": \"{{future_date}}\",\n  \"question\": {\n    \"question\": \"What is the capital of India?\",\n    \"options\": {\n      \"A\": \"Mumbai\",\n      \"B\": \"New Delhi\",\n      \"C\": \"Chennai\",\n      \"D\": \"Kolkata\"\n    },\n    \"answer\": \"New Delhi\"\n  }\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 403 FORBIDDEN', () => {",
+                  "  pm.expect(pm.response.code).to.eql(403);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('FORBIDDEN');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Employee cannot read stats (403)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_employee_wrong}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/admin/questions/{{v2_id}}/stats",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "questions",
+                "{{v2_id}}",
+                "stats"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 403 FORBIDDEN', () => {",
+                  "  pm.expect(pm.response.code).to.eql(403);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('FORBIDDEN');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Unknown question ID is 404",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_employee_unanswered}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/questions/2147480000/responses",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "questions",
+                "2147480000",
+                "responses"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"response_answer\": \"Mumbai\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 404 QUESTION_NOT_FOUND', () => {",
+                  "  pm.expect(pm.response.code).to.eql(404);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('QUESTION_NOT_FOUND');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Option label \"B\" instead of its text is 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_employee_unanswered}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/questions/{{v2_id}}/responses",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "questions",
+                "{{v2_id}}",
+                "responses"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"response_answer\": \"B\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 400 VALIDATION_ERROR', () => {",
+                  "  pm.expect(pm.response.code).to.eql(400);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('VALIDATION_ERROR');",
+                  "});",
+                  "pm.test('names response_answer and leaks no answer', () => {",
+                  "  pm.expect(pm.response.json().error.fields.map((f) => f.field)).to.include('response_answer');",
+                  "  pm.expect(pm.response.text()).to.not.include(pm.environment.get('v2_answer'));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Value that is not an option is 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_employee_unanswered}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/questions/{{v2_id}}/responses",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "questions",
+                "{{v2_id}}",
+                "responses"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"response_answer\": \"Bangalore\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 400 VALIDATION_ERROR', () => {",
+                  "  pm.expect(pm.response.code).to.eql(400);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('VALIDATION_ERROR');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Forged question text in the submission is 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_employee_unanswered}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/questions/{{v2_id}}/responses",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "questions",
+                "{{v2_id}}",
+                "responses"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"response_answer\": \"Mumbai\",\n  \"question\": \"Forged question\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 400 VALIDATION_ERROR', () => {",
+                  "  pm.expect(pm.response.code).to.eql(400);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('VALIDATION_ERROR');",
+                  "});",
+                  "pm.test('unknown field question', () => pm.expect(pm.response.json().error.fields).to.deep.include({ field: 'question', message: 'unknown field' }));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Forged correct_answer in the submission is 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_employee_unanswered}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/questions/{{v2_id}}/responses",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "questions",
+                "{{v2_id}}",
+                "responses"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"response_answer\": \"Mumbai\",\n  \"correct_answer\": \"Mumbai\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 400 VALIDATION_ERROR', () => {",
+                  "  pm.expect(pm.response.code).to.eql(400);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('VALIDATION_ERROR');",
+                  "});",
+                  "pm.test('unknown field correct_answer', () => pm.expect(pm.response.json().error.fields).to.deep.include({ field: 'correct_answer', message: 'unknown field' }));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Forged identity in the submission is 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_employee_unanswered}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/questions/{{v2_id}}/responses",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "questions",
+                "{{v2_id}}",
+                "responses"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"response_answer\": \"Mumbai\",\n  \"user_id\": \"someone.else@alrium.com\",\n  \"user_name\": \"Someone Else\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 400 VALIDATION_ERROR', () => {",
+                  "  pm.expect(pm.response.code).to.eql(400);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('VALIDATION_ERROR');",
+                  "});",
+                  "pm.test('unknown field user_id', () => pm.expect(pm.response.json().error.fields).to.deep.include({ field: 'user_id', message: 'unknown field' }));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Forged is_correct in the submission is 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_employee_unanswered}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/questions/{{v2_id}}/responses",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "questions",
+                "{{v2_id}}",
+                "responses"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"response_answer\": \"Mumbai\",\n  \"is_correct\": true\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 400 VALIDATION_ERROR', () => {",
+                  "  pm.expect(pm.response.code).to.eql(400);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('VALIDATION_ERROR');",
+                  "});",
+                  "pm.test('unknown field is_correct', () => pm.expect(pm.response.json().error.fields).to.deep.include({ field: 'is_correct', message: 'unknown field' }));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Forged responded_at in the submission is 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_employee_unanswered}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/questions/{{v2_id}}/responses",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "questions",
+                "{{v2_id}}",
+                "responses"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"response_answer\": \"Mumbai\",\n  \"responded_at\": \"2026-01-01T00:00:00+05:30\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 400 VALIDATION_ERROR', () => {",
+                  "  pm.expect(pm.response.code).to.eql(400);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('VALIDATION_ERROR');",
+                  "});",
+                  "pm.test('unknown field responded_at', () => pm.expect(pm.response.json().error.fields).to.deep.include({ field: 'responded_at', message: 'unknown field' }));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Forged response_id and question_id in the submission is 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_employee_unanswered}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/questions/{{v2_id}}/responses",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "questions",
+                "{{v2_id}}",
+                "responses"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"response_answer\": \"Mumbai\",\n  \"response_id\": 1,\n  \"question_id\": 1\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 400 VALIDATION_ERROR', () => {",
+                  "  pm.expect(pm.response.code).to.eql(400);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('VALIDATION_ERROR');",
+                  "});",
+                  "pm.test('unknown field response_id', () => pm.expect(pm.response.json().error.fields).to.deep.include({ field: 'response_id', message: 'unknown field' }));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Malformed JSON body is 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_employee_unanswered}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/questions/{{v2_id}}/responses",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "questions",
+                "{{v2_id}}",
+                "responses"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"response_answer\":"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 400 VALIDATION_ERROR', () => {",
+                  "  pm.expect(pm.response.code).to.eql(400);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('VALIDATION_ERROR');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Employee-unanswered has not answered version 2",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_employee_unanswered}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/questions/{{v2_id}}/my-response",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "questions",
+                "{{v2_id}}",
+                "my-response"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 404 RESPONSE_NOT_FOUND', () => {",
+                  "  pm.expect(pm.response.code).to.eql(404);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('RESPONSE_NOT_FOUND');",
+                  "});",
+                  "pm.test('no answer leaked', () => pm.expect(pm.response.text()).to.not.include(pm.environment.get('v2_answer')));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "PATCH a question is 405 (insert-only)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "X-Admin-Key",
+                "value": "{{admin_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/admin/questions/{{v2_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "questions",
+                "{{v2_id}}"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"question\": {\n    \"question\": \"What is the capital of India?\",\n    \"options\": {\n      \"A\": \"Mumbai\",\n      \"B\": \"New Delhi\",\n      \"C\": \"Chennai\",\n      \"D\": \"Kolkata\"\n    },\n    \"answer\": \"New Delhi\"\n  }\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 405 QUESTIONS_INSERT_ONLY', () => {",
+                  "  pm.expect(pm.response.code).to.eql(405);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('QUESTIONS_INSERT_ONLY');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "PUT a question is 405 (insert-only)",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "X-Admin-Key",
+                "value": "{{admin_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/admin/questions/{{v2_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "questions",
+                "{{v2_id}}"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"question\": {\n    \"question\": \"What is the capital of India?\",\n    \"options\": {\n      \"A\": \"Mumbai\",\n      \"B\": \"New Delhi\",\n      \"C\": \"Chennai\",\n      \"D\": \"Kolkata\"\n    },\n    \"answer\": \"New Delhi\"\n  }\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 405 QUESTIONS_INSERT_ONLY', () => {",
+                  "  pm.expect(pm.response.code).to.eql(405);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('QUESTIONS_INSERT_ONLY');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "DELETE a question is 405 (insert-only)",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "X-Admin-Key",
+                "value": "{{admin_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/admin/questions/{{v2_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "questions",
+                "{{v2_id}}"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 405 QUESTIONS_INSERT_ONLY', () => {",
+                  "  pm.expect(pm.response.code).to.eql(405);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('QUESTIONS_INSERT_ONLY');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Malformed question: missing option D is 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Admin-Key",
+                "value": "{{admin_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/admin/questions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "questions"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"question_date\": \"{{future_date}}\",\n  \"question\": {\n    \"question\": \"q\",\n    \"options\": {\n      \"A\": \"a\",\n      \"B\": \"b\",\n      \"C\": \"c\"\n    },\n    \"answer\": \"a\"\n  }\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 400 VALIDATION_ERROR', () => {",
+                  "  pm.expect(pm.response.code).to.eql(400);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('VALIDATION_ERROR');",
+                  "});",
+                  "pm.test('names question.options.D', () => pm.expect(pm.response.json().error.fields.map((f) => f.field)).to.include('question.options.D'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Malformed question: extra option E is 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Admin-Key",
+                "value": "{{admin_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/admin/questions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "questions"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"question_date\": \"{{future_date}}\",\n  \"question\": {\n    \"question\": \"q\",\n    \"options\": {\n      \"A\": \"a\",\n      \"B\": \"b\",\n      \"C\": \"c\",\n      \"D\": \"d\",\n      \"E\": \"e\"\n    },\n    \"answer\": \"a\"\n  }\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 400 VALIDATION_ERROR', () => {",
+                  "  pm.expect(pm.response.code).to.eql(400);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('VALIDATION_ERROR');",
+                  "});",
+                  "pm.test('names question.options.E', () => pm.expect(pm.response.json().error.fields.map((f) => f.field)).to.include('question.options.E'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Malformed question: answer given as label B is 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Admin-Key",
+                "value": "{{admin_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/admin/questions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "questions"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"question_date\": \"{{future_date}}\",\n  \"question\": {\n    \"question\": \"What is the capital of India?\",\n    \"options\": {\n      \"A\": \"Mumbai\",\n      \"B\": \"New Delhi\",\n      \"C\": \"Chennai\",\n      \"D\": \"Kolkata\"\n    },\n    \"answer\": \"B\"\n  }\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 400 VALIDATION_ERROR', () => {",
+                  "  pm.expect(pm.response.code).to.eql(400);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('VALIDATION_ERROR');",
+                  "});",
+                  "pm.test('names question.answer', () => pm.expect(pm.response.json().error.fields.map((f) => f.field)).to.include('question.answer'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Malformed question: answer not an option is 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Admin-Key",
+                "value": "{{admin_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/admin/questions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "questions"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"question_date\": \"{{future_date}}\",\n  \"question\": {\n    \"question\": \"What is the capital of India?\",\n    \"options\": {\n      \"A\": \"Mumbai\",\n      \"B\": \"New Delhi\",\n      \"C\": \"Chennai\",\n      \"D\": \"Kolkata\"\n    },\n    \"answer\": \"Bangalore\"\n  }\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 400 VALIDATION_ERROR', () => {",
+                  "  pm.expect(pm.response.code).to.eql(400);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('VALIDATION_ERROR');",
+                  "});",
+                  "pm.test('names question.answer', () => pm.expect(pm.response.json().error.fields.map((f) => f.field)).to.include('question.answer'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Malformed question: duplicate option values is 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Admin-Key",
+                "value": "{{admin_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/admin/questions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "questions"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"question_date\": \"{{future_date}}\",\n  \"question\": {\n    \"question\": \"q\",\n    \"options\": {\n      \"A\": \"Same\",\n      \"B\": \" Same \",\n      \"C\": \"c\",\n      \"D\": \"d\"\n    },\n    \"answer\": \"c\"\n  }\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 400 VALIDATION_ERROR', () => {",
+                  "  pm.expect(pm.response.code).to.eql(400);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('VALIDATION_ERROR');",
+                  "});",
+                  "pm.test('names question.options', () => pm.expect(pm.response.json().error.fields.map((f) => f.field)).to.include('question.options'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Malformed question: blank question text is 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Admin-Key",
+                "value": "{{admin_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/admin/questions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "questions"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"question_date\": \"{{future_date}}\",\n  \"question\": {\n    \"question\": \"   \",\n    \"options\": {\n      \"A\": \"a\",\n      \"B\": \"b\",\n      \"C\": \"c\",\n      \"D\": \"d\"\n    },\n    \"answer\": \"a\"\n  }\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 400 VALIDATION_ERROR', () => {",
+                  "  pm.expect(pm.response.code).to.eql(400);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('VALIDATION_ERROR');",
+                  "});",
+                  "pm.test('names question.question', () => pm.expect(pm.response.json().error.fields.map((f) => f.field)).to.include('question.question'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Malformed question: options as an array is 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Admin-Key",
+                "value": "{{admin_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/admin/questions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "questions"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"question_date\": \"{{future_date}}\",\n  \"question\": {\n    \"question\": \"q\",\n    \"options\": [\n      \"a\",\n      \"b\",\n      \"c\",\n      \"d\"\n    ],\n    \"answer\": \"a\"\n  }\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 400 VALIDATION_ERROR', () => {",
+                  "  pm.expect(pm.response.code).to.eql(400);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('VALIDATION_ERROR');",
+                  "});",
+                  "pm.test('names question.options', () => pm.expect(pm.response.json().error.fields.map((f) => f.field)).to.include('question.options'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Malformed question: unknown payload field is 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Admin-Key",
+                "value": "{{admin_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/admin/questions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "questions"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"question_date\": \"{{future_date}}\",\n  \"question\": {\n    \"question\": \"What is the capital of India?\",\n    \"options\": {\n      \"A\": \"Mumbai\",\n      \"B\": \"New Delhi\",\n      \"C\": \"Chennai\",\n      \"D\": \"Kolkata\"\n    },\n    \"answer\": \"New Delhi\",\n    \"hint\": \"x\"\n  }\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 400 VALIDATION_ERROR', () => {",
+                  "  pm.expect(pm.response.code).to.eql(400);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('VALIDATION_ERROR');",
+                  "});",
+                  "pm.test('names question.hint', () => pm.expect(pm.response.json().error.fields.map((f) => f.field)).to.include('question.hint'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Old flat question format is 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Admin-Key",
+                "value": "{{admin_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/admin/questions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "questions"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"question_date\": \"{{future_date}}\",\n  \"question\": \"q\",\n  \"option_a\": \"a\",\n  \"option_b\": \"b\",\n  \"option_c\": \"c\",\n  \"option_d\": \"d\",\n  \"correct_answer\": \"A\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 400 VALIDATION_ERROR', () => {",
+                  "  pm.expect(pm.response.code).to.eql(400);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('VALIDATION_ERROR');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Impossible date is 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Admin-Key",
+                "value": "{{admin_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/admin/questions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "questions"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"question_date\": \"2026-02-30\",\n  \"question\": {\n    \"question\": \"What is the capital of India?\",\n    \"options\": {\n      \"A\": \"Mumbai\",\n      \"B\": \"New Delhi\",\n      \"C\": \"Chennai\",\n      \"D\": \"Kolkata\"\n    },\n    \"answer\": \"New Delhi\"\n  }\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 400 VALIDATION_ERROR', () => {",
+                  "  pm.expect(pm.response.code).to.eql(400);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('VALIDATION_ERROR');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "No question rows written by rejected requests",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Admin-Key",
+                "value": "{{admin_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/admin/questions?page_size=1",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "questions"
+              ],
+              "query": [
+                {
+                  "key": "page_size",
+                  "value": "1"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('question count unchanged', () => pm.expect(pm.response.json().meta.total).to.eql(Number(pm.environment.get('questions_before'))));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Single-letter answer accepted when it IS an option value (future fixture)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Admin-Key",
+                "value": "{{admin_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/admin/questions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "questions"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"question_date\": \"{{future_date}}\",\n  \"question\": {\n    \"question\": \"Which letter comes second?\",\n    \"options\": {\n      \"A\": \"A\",\n      \"B\": \"B\",\n      \"C\": \"C\",\n      \"D\": \"D\"\n    },\n    \"answer\": \"B\"\n  }\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 201', () => {",
+                  "  pm.expect(pm.response.code).to.eql(201);",
+                  "  ",
+                  "});",
+                  "pm.test('stored answer is the text \"B\" of option B', () => pm.expect(pm.response.json().data.question.answer).to.eql('B'));",
+                  "pm.environment.set('future_id', pm.response.json().data.question_id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Future question cannot be answered (403)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_employee_unanswered}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/questions/{{future_id}}/responses",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "questions",
+                "{{future_id}}",
+                "responses"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"response_answer\": \"B\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 403 QUESTION_NOT_OPEN', () => {",
+                  "  pm.expect(pm.response.code).to.eql(403);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('QUESTION_NOT_OPEN');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Insert a past-dated question (fixture)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Admin-Key",
+                "value": "{{admin_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/admin/questions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "questions"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"question_date\": \"{{past_date}}\",\n  \"question\": {\n    \"question\": \"Past question (closed)\",\n    \"options\": {\n      \"A\": \"Mumbai\",\n      \"B\": \"New Delhi\",\n      \"C\": \"Chennai\",\n      \"D\": \"Kolkata\"\n    },\n    \"answer\": \"New Delhi\"\n  }\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 201', () => {",
+                  "  pm.expect(pm.response.code).to.eql(201);",
+                  "  ",
+                  "});",
+                  "pm.environment.set('past_id', pm.response.json().data.question_id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Past question cannot be answered (403)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_employee_unanswered}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/questions/{{past_id}}/responses",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "questions",
+                "{{past_id}}",
+                "responses"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"response_answer\": \"New Delhi\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 403 QUESTION_NOT_OPEN', () => {",
+                  "  pm.expect(pm.response.code).to.eql(403);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('QUESTION_NOT_OPEN');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Version 2 responses unchanged by the negative tests",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Admin-Key",
+                "value": "{{admin_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/admin/questions/{{v2_id}}/stats",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "questions",
+                "{{v2_id}}",
+                "stats"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('still exactly the responses from WRITES 2', () => pm.expect(pm.response.json().data.total).to.eql(Number(pm.environment.get('v2_total'))));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Replay (read only)",
+      "description": "Non-destructive replay of saved results after a write run (needs v1_id/v2_id). Safe to repeat.",
+      "item": [
+        {
+          "name": "Saved result on version 2: employee-correct",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_employee_correct}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/questions/{{v2_id}}/my-response",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "questions",
+                "{{v2_id}}",
+                "my-response"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const isDelhiTs = (s) => {",
+                  "  if (typeof s !== 'string' || !/^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\+05:30$/.test(s)) return false;",
+                  "  const t = Date.parse(s);",
+                  "  return !Number.isNaN(t) && new Date(t + 330 * 60000).toISOString().slice(0, 19) === s.slice(0, 19);",
+                  "};",
+                  "pm.test('200 with a persisted text result', () => {",
+                  "  pm.expect(pm.response.code).to.eql(200);",
+                  "  const d = pm.response.json().data;",
+                  "  pm.expect(d.correct_answer).to.eql(pm.environment.get('v2_answer'));",
+                  "  pm.expect(isDelhiTs(d.responded_at)).to.eql(true);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Saved result on version 2: employee-wrong",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_employee_wrong}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/questions/{{v2_id}}/my-response",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "questions",
+                "{{v2_id}}",
+                "my-response"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const isDelhiTs = (s) => {",
+                  "  if (typeof s !== 'string' || !/^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\+05:30$/.test(s)) return false;",
+                  "  const t = Date.parse(s);",
+                  "  return !Number.isNaN(t) && new Date(t + 330 * 60000).toISOString().slice(0, 19) === s.slice(0, 19);",
+                  "};",
+                  "pm.test('200 with a persisted text result', () => {",
+                  "  pm.expect(pm.response.code).to.eql(200);",
+                  "  const d = pm.response.json().data;",
+                  "  pm.expect(d.correct_answer).to.eql(pm.environment.get('v2_answer'));",
+                  "  pm.expect(isDelhiTs(d.responded_at)).to.eql(true);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if [[ -z "${QA_PGMOVE_INNER:-}" ]]; then
+    export QA_PGMOVE_INNER=1
+    exec "$ROOT/scripts/test-db" "$0" "$@"
+fi
+
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/qa-pgmove.XXXXXX")"
+NAME="qa-pgmove-target-$$"
+PORT="$(( 40000 + RANDOM % 9000 ))"
+PASS="target-$(openssl rand -hex 12)"
+cleanup() { docker rm -f "$NAME" >/dev/null 2>&1 || true; rm -rf "$WORK"; }
+trap cleanup EXIT
+
+docker run -d --name "$NAME" -e POSTGRES_PASSWORD="$PASS" -e POSTGRES_USER=local_admin -e POSTGRES_DB=postgres \
+    -p "127.0.0.1:$PORT:5432" postgres:18 -c timezone=UTC >/dev/null
+for _ in $(seq 60); do docker exec "$NAME" pg_isready -h 127.0.0.1 -U local_admin >/dev/null 2>&1 && break; sleep 1; done
+
+if [[ -z "${PG_BIN:-}" ]] && ! command -v pg_dump >/dev/null 2>&1; then
+    mkdir -p "$WORK/bin"
+    for t in pg_dump pg_restore psql; do
+        cat > "$WORK/bin/$t" <<SHIM
+args=(); for a in "\$@"; do args+=("\${a//127.0.0.1/host.docker.internal}"); done
+exec docker run --rm -i -e PGPASSWORD -e PGTZ -e PGCONNECT_TIMEOUT postgres:18 $t "\${args[@]}"
+SHIM
+        chmod +x "$WORK/bin/$t"
+    done
+    export PG_BIN="$WORK/bin"
+    echo "# using test-only client shims (no local PostgreSQL client tools on this machine)" >&2
+fi
+
+export QA_PGMOVE_TARGET_ADMIN_URL="postgresql://local_admin:$PASS@127.0.0.1:$PORT/postgres"
+cd "$ROOT/backend"
+uv run pytest -q tests/test_pgmove.py "$@"

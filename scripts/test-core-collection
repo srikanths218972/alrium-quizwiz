@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -z "${QA_CORE_INNER:-}" ]]; then export QA_CORE_INNER=1; exec "$ROOT/scripts/test-db" "$0" "$@"; fi
+
+PORT="$(( 45000 + RANDOM % 4000 ))"; BASE="http://127.0.0.1:$PORT"
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/qa-core.XXXXXX")"
+ADMIN_KEY="$(openssl rand -hex 32)"
+export DATABASE_URL="$TEST_DATABASE_URL" AUTH_MODE=email APP_ENV=local EMAIL_ALLOWED_DOMAINS= EMAIL_LOGIN_RATE_PER_MINUTE=100 \
+    EMAIL_TOKEN_SECRET="$(openssl rand -hex 32)" ADMIN_API_KEY="$ADMIN_KEY"
+dc() { docker compose --project-directory "$ROOT" -f "$ROOT/compose.yaml" --env-file "$QA_TEST_ENV_FILE" "$@"; }
+cd "$ROOT/backend"
+uv run --frozen python -m qa_api.migrate >/dev/null
+
+api_pid=""
+start_api() {
+    uv run --frozen uvicorn qa_api.app:create_app --factory --host 127.0.0.1 --port "$PORT" >>"$WORK/api.log" 2>&1 & api_pid=$!
+    for _ in $(seq 60); do curl -fsS "$BASE/health/ready" >/dev/null 2>&1 && return 0; sleep 0.5; done
+    tail -20 "$WORK/api.log"; return 1
+}
+stop_api() { [[ -n "$api_pid" ]] && kill "$api_pid" 2>/dev/null && wait "$api_pid" 2>/dev/null || true; api_pid=""; }
+trap 'stop_api; rm -rf "$WORK"' EXIT
+
+fail=0
+check() { if [[ "$2" == "$3" ]]; then echo "ok   - $1"; else echo "FAIL - $1: expected [$3], got [$2]"; fail=1; fi; }
+sql() { uv run --frozen python -c 'import os,sys,psycopg; c=psycopg.connect(os.environ["DATABASE_URL"], options="-c timezone=Asia/Kolkata -c default_transaction_read_only=on"); print("\n".join("|".join(map(str,r)) for r in c.execute(sys.argv[1]).fetchall()))' "$1"; }
+
+newman_one() {
+    local collection="$1" name="$2"; shift 2
+    rm -f "$WORK/out.json"
+    (cd "$ROOT" && npx --no-install newman run "$collection" -e postman/quizwiz.postman_environment.json \
+        --folder "$name" --env-var "base_url=$BASE" --env-var "admin_key=$ADMIN_KEY" "$@" --reporters json --reporter-json-export "$WORK/out.json" --export-environment "$WORK/env.json" >/dev/null 2>&1) || true
+    python3 - "$WORK/out.json" <<'PY'
+import json, sys
+run = json.load(open(sys.argv[1]))["run"]
+e = (run["executions"] or [{}])[0]
+if "response" not in e:
+    errs = [f["error"]["message"] for f in run.get("failures", [])]
+    print("SKIPPED", json.dumps(errs))
+else:
+    print(e["response"]["code"], bytes(e["response"]["stream"]["data"]).decode())
+PY
+}
+run() { local name="$1"; shift; newman_one postman/quizwiz.postman_collection.json "$name" "$@"; }
+envvar() { python3 -c 'import json,sys; print(next(v["value"] for v in json.load(open(sys.argv[1]))["values"] if v["key"]==sys.argv[2]))' "$WORK/env.json" "$1"; }
+with_body() {
+    local name="$1" body="$2"; shift 2
+    python3 - "$ROOT/postman/quizwiz.postman_collection.json" "$WORK/typed.json" "$name" "$body" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1]))
+for f in c["item"]:
+    for i in f["item"]:
+        if i["name"] == sys.argv[3]:
+            i["request"]["body"]["raw"] = sys.argv[4]
+json.dump(c, open(sys.argv[2], "w"))
+PY
+    newman_one "$WORK/typed.json" "$name" "$@"
+}
+qbody() { python3 -c 'import json,sys; d,q,a,b,c,dd,ans=sys.argv[1:]; print(json.dumps({"question_date": d, "question": {"question": q, "options": {"A": a, "B": b, "C": c, "D": dd}, "answer": ans}}))' "$@"; }
+rbody() { python3 -c 'import json,sys; print(json.dumps({"response_answer": sys.argv[1]}))' "$1"; }
+token_for() {
+    local out; out="$(run 'Sign up' --env-var "email=$1")"
+    [[ "$(echo "$out" | code)" == 409 ]] && run 'Sign in' --env-var "email=$1" >/dev/null
+    envvar token
+}
+respond() { with_body "Post response" "$(rbody "$3")" --env-var "question_id=$1" --env-var "token=$(token_for "$2")"; }
+field() { python3 -c 'import json,sys; d=json.loads(sys.stdin.read().split(" ",1)[1]); e=sys.argv[1]; print(eval("d"+e if e.startswith("[\"") else e))' "$1"; }
+code() { cut -d' ' -f1; }
+
+start_api
+check "the collection has the expected folders and requests" \
+    "$(python3 -c 'import json; a=json.load(open("'"$ROOT"'/postman/quizwiz.postman_collection.json")); print({f["name"]: [i["name"] for i in f["item"]] for f in a["item"]})')" \
+    "{'Sign-in': ['Auth mode', 'Sign up', 'Sign in'], 'Admin': ['List all users', 'All responses', 'Responses to question', 'Answers by date', 'Get all questions', 'Create question'], 'Participant': ['Get question of the day', 'Post response']}"
+check "no sample content in the client files" \
+    "$(cat "$ROOT"/postman/*.json | grep -ciE 'capital|delhi|x-user|open.access|'$'\xe2\x80\x94' || true)" "0"
+check "environment variables, with email, token and admin_key blank" \
+    "$(python3 -c 'import json; print([(v["key"], v["value"]) for v in json.load(open("'"$ROOT"'/postman/quizwiz.postman_environment.json"))["values"] if v["key"] not in ("base_url", "page", "page_size")])')" \
+    "[('email', ''), ('token', ''), ('admin_key', ''), ('question_id', ''), ('date', '')]"
+check "Auth mode reports email" "$(run 'Auth mode' | field '["data"]["mode"]')" "email"
+TODAY="$(sql "SELECT qa_business_date(clock_timestamp())")"
+
+echo "# 1. requests refuse to send without content"
+check "Create question with the blank template body is not sent" "$(run 'Create question' | cut -d' ' -f1)" "SKIPPED"
+check "Create question with a blank date is not sent" "$(with_body 'Create question' "$(qbody '' Q a b c d a)" | cut -d' ' -f1)" "SKIPPED"
+check "Create question whose answer is not an option is not sent" "$(with_body 'Create question' "$(qbody "$TODAY" Q a b c d e)" | cut -d' ' -f1)" "SKIPPED"
+check "Sign up without email is not sent" "$(run 'Sign up' | cut -d' ' -f1)" "SKIPPED"
+check "Get question of the day without a token is not sent" "$(run 'Get question of the day' | cut -d' ' -f1)" "SKIPPED"
+check "Post response without question_id is not sent" "$(with_body 'Post response' "$(rbody x)" --env-var token=t | cut -d' ' -f1)" "SKIPPED"
+check "Post response with the blank template body is not sent" "$(run 'Post response' --env-var question_id=1 --env-var token=t | cut -d' ' -f1)" "SKIPPED"
+check "Create question without admin_key is not sent" "$(with_body 'Create question' "$(qbody 2026-01-01 Q a b c d a)" --env-var admin_key= | cut -d' ' -f1)" "SKIPPED"
+check "nothing was written" "$(sql 'SELECT (SELECT count(*) FROM questions) + (SELECT count(*) FROM responses) + (SELECT count(*) FROM users)')" "0"
+
+echo "# 1b. sign up and sign in (email only, no password)"
+check "Sign in with an email that has not signed up is 404 USER_NOT_FOUND" "$(run 'Sign in' --env-var email=first.last@example.test | field '["error"]["code"]')" "USER_NOT_FOUND"
+check "Sign up is 201" "$(run 'Sign up' --env-var email=first.last@example.test | code)" "201"
+check "Sign up saved the token" "$([[ -n "$(envvar token)" ]] && echo yes)" "yes"
+check "Sign up again is 409 USER_EXISTS" "$(run 'Sign up' --env-var email=First.Last@example.test | field '["error"]["code"]')" "USER_EXISTS"
+check "Sign in is 200" "$(run 'Sign in' --env-var email=first.last@example.test | code)" "200"
+check "Sign up with an invalid email is 400" "$(run 'Sign up' --env-var email=not-an-email | code)" "400"
+check "a wrong admin key is refused" "$(run 'List all users' --env-var admin_key=wrong | code)" "401"
+TOKEN="$(token_for first.last@example.test)"
+
+echo "# 2. empty schedule"
+check "Get question of the day on an empty database is 404 QUESTION_NOT_SCHEDULED" "$(run 'Get question of the day' --env-var "token=$TOKEN" | field '["error"]["code"]')" "QUESTION_NOT_SCHEDULED"
+check "Get all questions on an empty database is 200 with total 0" "$(run 'Get all questions' | field '["meta"]["total"]')" "0"
+check "List all users shows the signed-up user before any answer" "$(run 'List all users' | field '[(u["user_id"], u["response_count"]) for u in d["data"]]')" "[('first.last@example.test', 0)]"
+
+echo "# 3. create today's question (admin key)"
+out="$(with_body 'Create question' "$(qbody "$TODAY" 'Which planet is known as the red planet?' Venus Mars Jupiter Saturn Mars)")"
+check "Create question is 201" "$(echo "$out" | code)" "201"
+check "stored answer is the actual text" "$(echo "$out" | field '["data"]["question"]["answer"]')" "Mars"
+V1="$(echo "$out" | field '["data"]["question_id"]')"
+out="$(with_body 'Create question' "$(qbody "$TODAY" 'Which planet is closest to the Sun?' Mercury Mars Jupiter Saturn Mercury)")"
+check "a second Create question for the same date is also 201" "$(echo "$out" | code)" "201"
+V2="$(echo "$out" | field '["data"]["question_id"]')"
+check "the second insert is a new row" "$([[ "$V2" -gt "$V1" ]] && echo yes)" "yes"
+check "Create question saved question_id" "$(envvar question_id)" "$V2"
+
+echo "# 4. get all questions and question of the day"
+out="$(run 'Get all questions')"
+check "Get all questions lists both versions" "$(echo "$out" | field '["meta"]["total"]')" "2"
+check "only the newest is latest" "$(echo "$out" | field '[q["is_latest_for_date"] for q in d["data"]]')" "[False, True]"
+out="$(run 'Get question of the day' --env-var "token=$TOKEN")"
+check "today serves the newest version" "$(echo "$out" | field '["data"]["question_id"]')" "$V2"
+check "Get question of the day saved question_id" "$(envvar question_id)" "$V2"
+check "no answer before submitting" "$(echo "$out" | field 'sorted(d["data"]["question"])')" "['options', 'question']"
+
+echo "# 5. post response (signed-in token, explicit question_id, actual option text)"
+out="$(respond "$V2" '  First.Last@Example.TEST ' Mercury)"
+check "correct text is 201" "$(echo "$out" | code)" "201"
+check "correct result" "$(echo "$out" | field '[d["data"][k] for k in ("question_id","question","correct_answer","response_answer","is_correct")]')" \
+    "[$V2, 'Which planet is closest to the Sun?', 'Mercury', 'Mercury', True]"
+out="$(respond "$V2" second.person@example.test Jupiter)"
+check "incorrect text is 201" "$(echo "$out" | code)" "201"
+check "incorrect result" "$(echo "$out" | field '[d["data"][k] for k in ("correct_answer","response_answer","is_correct")]')" "['Mercury', 'Jupiter', False]"
+check "the same email again (any case) is 409 ALREADY_ANSWERED" "$(respond "$V2" FIRST.LAST@example.test Mars | field '["error"]["code"]')" "ALREADY_ANSWERED"
+check "older version answered by its own ID is scored against it" "$(respond "$V1" third.person+quiz@example.test Mars | field '[d["data"][k] for k in ("question_id","correct_answer","is_correct")]')" "[$V1, 'Mars', True]"
+check "option label B is 400" "$(respond "$V1" second.person@example.test B | code)" "400"
+check "unknown question is 404" "$(respond 2147480000 a@example.test Mars | code)" "404"
+check "List all users shows each tester once with counts" "$(run 'List all users' | field '[(u["user_id"], u["response_count"], u["correct_count"]) for u in d["data"]]')" \
+    "[('a@example.test', 0, 0), ('first.last@example.test', 1, 1), ('second.person@example.test', 1, 0), ('third.person+quiz@example.test', 1, 1)]"
+check "All responses lists who answered, what they chose and if correct" "$(run 'All responses' | field '[(r["user_id"], r["response_answer"], r["is_correct"]) for r in d["data"]]')" \
+    "[('third.person+quiz@example.test', 'Mars', True), ('second.person@example.test', 'Jupiter', False), ('first.last@example.test', 'Mercury', True)]"
+
+check "Answers by date without a date is not sent" "$(run 'Answers by date' | cut -d' ' -f1)" "SKIPPED"
+check "Answers by date maps each answer to its user" "$(run 'Answers by date' --env-var "date=$TODAY" | field '[(a["user_id"], a["question_id"], a["response_answer"], a["is_correct"]) for a in d["data"]["answered"]]')" \
+    "[('first.last@example.test', $V2, 'Mercury', True), ('second.person@example.test', $V2, 'Jupiter', False), ('third.person+quiz@example.test', $V1, 'Mars', True)]"
+check "Answers by date lists who did not answer" "$(run 'Answers by date' --env-var "date=$TODAY" | field '[u["user_id"] for u in d["data"]["not_answered"]]')" "['a@example.test']"
+
+echo "# 6. inspect PostgreSQL (read-only)"
+check "stored responses (ids, emails, texts, scores)" \
+    "$(sql "SELECT string_agg(question_id || ':' || user_id || ':' || user_name || ':' || correct_answer || ':' || response_answer || ':' || is_correct, ',' ORDER BY response_id) FROM responses")" \
+    "$V2:first.last@example.test:first.last@example.test:Mercury:Mercury:true,$V2:second.person@example.test:second.person@example.test:Mercury:Jupiter:false,$V1:third.person+quiz@example.test:third.person+quiz@example.test:Mars:Mars:true"
+check "responded_at assigned by the database" "$(sql "SELECT bool_and(responded_at <= now()) FROM responses")" "True"
+check "questions are JSONB with text answers" "$(sql "SELECT count(*) || ':' || min(pg_typeof(question)::text) || ':' || bool_and(question->>'answer' NOT IN ('A','B','C','D')) FROM questions")" "2:jsonb:true"
+
+echo "# 6b. text with quotes, a line break and a backslash stays valid JSON"
+TRICKY_Q=$'Which path is "C:\\temp"?\nPick one.'
+out="$(with_body 'Create question' "$(qbody "$(sql "SELECT qa_business_date(clock_timestamp()) + 1")" "$TRICKY_Q" 'C:\temp' 'say "hi"' plain 'back\slash' 'say "hi"')")"
+check "Create question with special characters is 201" "$(echo "$out" | code)" "201"
+TID="$(echo "$out" | field '["data"]["question_id"]')"
+check "stored text is exact" "$(sql "SELECT question->>'question' = E'Which path is \"C:\\\\temp\"?\\nPick one.' AND question->>'answer' = 'say \"hi\"' AND question->'options'->>'D' = E'back\\\\slash' FROM questions WHERE question_id = $TID")" "True"
+check "a future question cannot be answered yet" "$(respond "$TID" a@example.test 'say "hi"' | field '["error"]["code"]')" "QUESTION_NOT_OPEN"
+
+echo "# 7. database outage and pool recovery (API process keeps running)"
+dc stop db >/dev/null 2>&1
+check "readiness is 503 while PostgreSQL is down" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/health/ready")" "503"
+out="$(run 'Get question of the day' --env-var "token=$TOKEN")"
+check "business route is 503 SERVICE_UNAVAILABLE without details" "$(echo "$out" | field '["error"]["code"]')" "SERVICE_UNAVAILABLE"
+check "no connection details leaked" "$(echo "$out" | grep -cE '127\.0\.0\.1|password|psycopg' || true)" "0"
+dc start db >/dev/null 2>&1 && dc up -d --wait db >/dev/null 2>&1
+for _ in $(seq 30); do [[ "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/health/ready")" == 200 ]] && break; sleep 1; done
+check "readiness recovers without restarting the API" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/health/ready")" "200"
+check "business route recovers" "$(run 'Get question of the day' --env-var "token=$TOKEN" | field '["data"]["question_id"]')" "$V2"
+
+echo "# 8. persistence after a normal restart (volume kept)"
+before="$(sql "SELECT md5(string_agg(r::text, '' ORDER BY response_id)) FROM responses r")"
+stop_api; dc restart db >/dev/null 2>&1; dc up -d --wait db >/dev/null 2>&1; start_api
+check "rows unchanged after restarting PostgreSQL and the API" "$(sql "SELECT md5(string_agg(r::text, '' ORDER BY response_id)) FROM responses r")" "$before"
+check "saved users still listed" "$(run 'List all users' | field '["meta"]["total"]')" "4"
+exit "$fail"
